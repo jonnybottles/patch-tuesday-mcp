@@ -22,6 +22,33 @@ Perfect for security analysts, sysadmins, and IT professionals who triage Micros
 
 Data comes from the official, public [MSRC CVRF v3 API](https://github.com/microsoft/MSRC-Microsoft-Security-Updates-API). No authentication or API key required.
 
+## Why This Server?
+
+**This is the only MCP server that models the Patch Tuesday release itself.** Plenty of MCP servers can look up a CVE — general-purpose vulnerability aggregators fan a known CVE ID out across NVD, OSV, and threat-intel feeds. They answer *"tell me about CVE-X"*. But they have no concept of a monthly Microsoft release, a KB article, or a product family — so they structurally cannot answer the questions a Microsoft shop actually asks on the second Tuesday of every month:
+
+| The question you actually have | Generic CVE lookup servers | patch-tuesday-mcp |
+|---|---|---|
+| "Summarize this month's Patch Tuesday" | ❌ no concept of a release | ✅ rollup + stats in one call |
+| "What Critical CVEs affect Windows Server 2022 this month?" | ❌ can't filter by Microsoft product | ✅ product & family filtering |
+| "Which vulnerabilities does KB5094123 fix?" | ❌ no KB awareness | ✅ KB ↔ CVE mapping |
+| "What's being exploited in the wild right now?" | ⚠️ per-CVE only, if you already know the CVE | ✅ filter the whole month |
+| "What do I patch first?" | ❌ | ✅ urgency-sorted: exploited → severity → CVSS |
+| "Tell me about CVE-X" | ✅ (often with more ecosystem data) | ✅ MSRC detail: KBs, builds, supersedence |
+
+Under the hood, the difference is the data source: this server parses the full **MSRC CVRF monthly documents** — the ProductTree, per-product severity threats, exploitability assessments, and KB remediation chains that per-CVE APIs never expose. That's what makes release-centric questions possible.
+
+Other things it deliberately gets right:
+
+- **Zero API keys, zero accounts** — the MSRC API is public; setup is one `uvx` command
+- **One tool, not thirty** — a single consolidated `msrc_search` keeps your AI client's context lean and tool selection reliable
+- **Built for the monthly workflow** — triage a release, brief your team, prioritize patching, then get on with your life
+
+### Roadmap
+
+- **EPSS scores** (FIRST.org) — data-driven 30-day exploitation probability per CVE, for sharper "patch this first" ranking than severity alone
+- **CISA KEV integration** — flag CVEs on the Known Exploited Vulnerabilities catalog, with federal remediation due dates (`kev=True` filter)
+- Cross-month keyword search
+
 ## Requirements
 
 ### General
