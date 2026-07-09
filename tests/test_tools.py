@@ -275,6 +275,108 @@ async def test_no_vector_filter_keeps_summary_lean():
     assert all("cvss" not in v for v in result["vulnerabilities"])
 
 
+# --- Report mode (format=markdown/csv) ---
+
+
+async def test_default_format_is_json_unchanged():
+    result = await msrc_search()
+    assert "markdown" not in result
+    assert "csv" not in result
+    assert "format" not in result
+    assert "vulnerabilities" in result
+
+
+async def test_markdown_report_has_summary_and_table():
+    result = await msrc_search(format="markdown")
+    assert result["format"] == "markdown"
+    md = result["markdown"]
+    # Executive summary heading and a prioritized table
+    assert md.startswith("# Patch Tuesday Triage")
+    assert "vulnerabilities matched" in md
+    assert "| CVE | Title |" in md
+    # JSON list still present alongside the rendering
+    assert result["vulnerabilities"]
+    # One table row per shown vulnerability (plus heading + separator)
+    row_count = sum(1 for line in md.splitlines() if line.startswith("| [CVE-"))
+    assert row_count == len(result["vulnerabilities"])
+
+
+async def test_markdown_respects_limit_but_reports_full_total():
+    result = await msrc_search(format="markdown", limit=2)
+    assert result["total_found"] == 6
+    assert len(result["vulnerabilities"]) == 2
+    rows = sum(1 for line in result["markdown"].splitlines() if line.startswith("| [CVE-"))
+    assert rows == 2
+    # Summary counts reflect the full matched set, not just the page
+    assert "**6** vulnerabilities matched" in result["markdown"]
+
+
+async def test_csv_report_is_parseable_with_stable_columns():
+    import csv
+    import io
+
+    from patch_tuesday_mcp.tools.formatters import TRIAGE_COLUMNS
+
+    result = await msrc_search(format="csv")
+    assert result["format"] == "csv"
+    assert result["columns"] == TRIAGE_COLUMNS
+    rows = list(csv.DictReader(io.StringIO(result["csv"])))
+    assert len(rows) == len(result["vulnerabilities"])
+    assert list(rows[0].keys()) == TRIAGE_COLUMNS
+    assert rows[0]["cve"].startswith("CVE-")
+    assert rows[0]["rationale"]
+
+
+async def test_invalid_format_rejected():
+    result = await msrc_search(format="xml")
+    assert "Invalid format" in result["error"]
+    assert result["error_kind"] == "invalid_input"
+
+
+async def test_invalid_report_rejected():
+    result = await msrc_search(format="markdown", report="bogus")
+    assert "Invalid report" in result["error"]
+    assert result["error_kind"] == "invalid_input"
+
+
+# --- Cache controls + freshness ---
+
+
+async def test_include_freshness_adds_metadata_block():
+    result = await msrc_search(include_freshness=True)
+    assert "freshness" in result
+    fresh = result["freshness"]
+    assert fresh["msrc"]["month"] == "2026-Jun"
+    assert fresh["msrc"]["available"] is True
+    assert "ttl_seconds" in fresh["epss"]
+    assert "ttl_seconds" in fresh["kev"]
+
+
+async def test_no_freshness_by_default():
+    result = await msrc_search()
+    assert "freshness" not in result
+
+
+async def test_force_refresh_implies_freshness_and_refetches(monkeypatch):
+    from patch_tuesday_mcp.feeds import msrc_api as api
+
+    calls = []
+    original = api.fetch_month
+
+    async def counting_fetch(month_id, slim=False, force_refresh=False):
+        calls.append((month_id, force_refresh))
+        return await original(month_id, slim=slim, force_refresh=force_refresh)
+
+    monkeypatch.setattr(search_module.msrc_api, "fetch_month", counting_fetch)
+
+    await msrc_search()  # warm the cache
+    result = await msrc_search(force_refresh=True)
+
+    assert result["freshness"]["force_refresh"] is True
+    assert result["filters_applied"].get("force_refresh") is True
+    assert calls[-1] == ("2026-Jun", True), "force_refresh must reach fetch_month"
+
+
 async def test_month_normalization_and_invalid():
     result = await msrc_search(month="2026-06")
     assert result["month"] == "2026-Jun"
@@ -662,3 +764,239 @@ async def test_kb_lookup_respects_limit_and_offset(monkeypatch):
     cves1 = {v["cve"] for v in page1["vulnerabilities"]}
     cves2 = {v["cve"] for v in page2["vulnerabilities"]}
     assert cves1.isdisjoint(cves2)
+
+
+# --- Mitigations & workarounds (include_guidance) ---
+
+
+def _guidance_month_doc() -> dict:
+    """A minimal CVRF month with one CVE carrying mitigation/workaround text."""
+    return {
+        "DocumentTracking": {
+            "Identification": {"ID": {"Value": "2026-Jun"}},
+            "InitialReleaseDate": "2026-06-09T07:00:00Z",
+            "CurrentReleaseDate": "2026-06-09T07:00:00Z",
+        },
+        "DocumentTitle": {"Value": "2026-Jun Security Updates"},
+        "ProductTree": {"FullProductName": [], "Branch": []},
+        "Vulnerability": [
+            {
+                "CVE": "CVE-2026-70000",
+                "Title": {"Value": "Guidance example"},
+                "Threats": [{"Type": 3, "Description": {"Value": "Important"}}],
+                "Remediations": [
+                    {"Type": 2, "Description": {"Value": "5099999"}, "SubType": "Security Update"},
+                    {
+                        "Type": 1,
+                        "Description": {"Value": "<p>Disable the <b>Foo</b> service.</p>"},
+                        "URL": "https://msrc.microsoft.com/mitigation",
+                    },
+                    {"Type": 0, "Description": {"Value": "Block inbound port 445."}},
+                ],
+            }
+        ],
+    }
+
+
+@pytest.fixture
+def mock_guidance_cve(monkeypatch):
+    clear_cache()
+    doc = _guidance_month_doc()
+
+    async def fake_get_json(url, timeout=60.0):
+        if "/updates('CVE-2026-70000')" in url:
+            return {"value": [{"ID": "2026-Jun"}]}
+        if url.endswith("/cvrf/2026-Jun"):
+            return doc
+        raise MsrcApiError(f"unexpected URL in test: {url}")
+
+    monkeypatch.setattr(msrc_api, "_get_json", fake_get_json)
+    yield
+    clear_cache()
+
+
+async def test_cve_detail_includes_guidance_when_requested(mock_guidance_cve):
+    detail = (await msrc_search(cve="CVE-2026-70000", include_guidance=True))[
+        "vulnerabilities"
+    ][0]
+    assert [g["type"] for g in detail["guidance"]] == ["mitigation", "workaround"]
+    assert detail["guidance"][0]["description"] == "Disable the Foo service."
+    assert detail["guidance"][0]["url"] == "https://msrc.microsoft.com/mitigation"
+    # Vendor-fix KB is unaffected and still present.
+    assert detail["kb_articles"][0]["kb"] == "5099999"
+
+
+async def test_cve_detail_omits_guidance_by_default(mock_guidance_cve):
+    detail = (await msrc_search(cve="CVE-2026-70000"))["vulnerabilities"][0]
+    assert "guidance" not in detail
+
+
+# --- Historical trend search (months_back / start_month / end_month) ---
+
+
+def _trend_vuln(cve, title, severity="Important", exploited=False, disclosed=False):
+    status = (
+        f"Publicly Disclosed:{'Yes' if disclosed else 'No'};"
+        f"Exploited:{'Yes' if exploited else 'No'}"
+    )
+    return {
+        "CVE": cve,
+        "Title": {"Value": title},
+        "Notes": [{"Type": 2, "Value": "<p>desc</p>"}],
+        "Threats": [
+            {"Type": 3, "Description": {"Value": severity}},
+            {"Type": 1, "Description": {"Value": status}},
+        ],
+        "Remediations": [],
+    }
+
+
+def _trend_month_doc(month_id, date, vulns):
+    return {
+        "DocumentTracking": {
+            "Identification": {"ID": {"Value": month_id}},
+            "InitialReleaseDate": date,
+            "CurrentReleaseDate": date,
+        },
+        "DocumentTitle": {"Value": f"{month_id} Security Updates"},
+        "ProductTree": {"FullProductName": [], "Branch": []},
+        "Vulnerability": vulns,
+    }
+
+
+# Six released months (Jan–Jun 2026) plus a pre-release July, each with one
+# HTTP.sys Critical and one DNS Important; June's HTTP.sys is exploited.
+_TREND_MONTHS = {
+    "2026-Jul": ("2026-07-14T18:00:00Z", 7),
+    "2026-Jun": ("2026-06-09T18:00:00Z", 6),
+    "2026-May": ("2026-05-12T18:00:00Z", 5),
+    "2026-Apr": ("2026-04-14T18:00:00Z", 4),
+    "2026-Mar": ("2026-03-10T18:00:00Z", 3),
+    "2026-Feb": ("2026-02-10T18:00:00Z", 2),
+    "2026-Jan": ("2026-01-13T18:00:00Z", 1),
+}
+
+
+def _patch_trend_months(monkeypatch):
+    docs = {}
+    index_entries = []
+    for month_id, (date, n) in _TREND_MONTHS.items():
+        vulns = [
+            _trend_vuln(
+                f"CVE-2026-5{n}001",
+                "HTTP.sys Remote Code Execution Vulnerability",
+                severity="Critical",
+                exploited=(month_id == "2026-Jun"),
+            ),
+            _trend_vuln(f"CVE-2026-5{n}002", "Windows DNS Spoofing Vulnerability"),
+        ]
+        docs[month_id] = _trend_month_doc(month_id, date, vulns)
+        index_entries.append(
+            {
+                "ID": month_id,
+                "DocumentTitle": f"{month_id} Security Updates",
+                "InitialReleaseDate": date,
+                "CurrentReleaseDate": date,
+            }
+        )
+
+    index = {"value": index_entries}
+
+    async def fake_get_json(url, timeout=60.0):
+        if url.endswith("/updates"):
+            return index
+        for month_id, doc in docs.items():
+            if url.endswith(f"/cvrf/{month_id}"):
+                return doc
+        raise MsrcApiError("not found")
+
+    monkeypatch.setattr(msrc_api, "_get_json", fake_get_json)
+    # Freeze the clock so Jan–Jun are released and July is pre-Patch-Tuesday.
+    monkeypatch.setattr(msrc_api, "utcnow", lambda: datetime(2026, 7, 9, tzinfo=timezone.utc))
+    clear_cache()
+
+
+async def test_trend_months_back_aggregates_across_released_months(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(query="HTTP.sys", months_back=6, limit=50)
+
+    assert "error" not in result
+    assert "month" not in result, "trend responses use range, not a single month"
+    assert result["months_searched"] == 6
+    assert result["range"]["start"] == "2026-Jan"
+    assert result["range"]["end"] == "2026-Jun"
+    assert "2026-Jul" not in result["range"]["months"], "pre-release month excluded"
+    # One HTTP.sys CVE per month across six months
+    assert result["total_found"] == 6
+    assert len(result["trend"]) == 6
+    assert all(entry["total"] == 1 for entry in result["trend"])
+    # Trend is newest-first and June's HTTP.sys is exploited
+    assert result["trend"][0]["month"] == "2026-Jun"
+    assert result["trend"][0]["exploited"] == 1
+
+
+async def test_trend_start_end_range_and_ordering(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(start_month="2026-Feb", end_month="2026-Apr", limit=50)
+
+    assert result["months_searched"] == 3
+    assert result["range"]["months"] == ["2026-Apr", "2026-Mar", "2026-Feb"]
+    # Two CVEs per month, three months
+    assert result["total_found"] == 6
+
+
+async def test_trend_exploited_filter_by_month(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(exploited=True, months_back=6)
+
+    assert result["total_found"] == 1, "only June's HTTP.sys is exploited"
+    assert result["vulnerabilities"][0]["cve"] == "CVE-2026-56001"
+    exploited_by_month = {e["month"]: e["exploited"] for e in result["trend"]}
+    assert exploited_by_month["2026-Jun"] == 1
+    assert exploited_by_month["2026-May"] == 0
+
+
+async def test_trend_respects_limit_but_reports_full_total(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(months_back=6, limit=3)
+    assert result["total_found"] == 12  # 2 CVEs * 6 months
+    assert len(result["vulnerabilities"]) == 3
+
+
+async def test_trend_range_cap_exceeded_rejected(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(months_back=13)
+    assert result["error_kind"] == "invalid_input"
+    assert "maximum is 12" in result["error"]
+
+
+async def test_trend_months_back_and_range_mutually_exclusive(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(months_back=3, start_month="2026-Jan")
+    assert result["error_kind"] == "invalid_input"
+    assert "not both" in result["error"]
+
+
+async def test_trend_invalid_month_rejected(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(start_month="nonsense")
+    assert result["error_kind"] == "invalid_input"
+    assert "Invalid month" in result["error"]
+
+
+async def test_trend_markdown_report(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(query="HTTP.sys", months_back=6, format="markdown", limit=50)
+    assert result["format"] == "markdown"
+    assert result["markdown"].startswith("# Patch Tuesday Triage")
+    assert result["months_searched"] == 6
+
+
+async def test_no_range_params_keeps_single_month(monkeypatch):
+    _patch_trend_months(monkeypatch)
+    result = await msrc_search(limit=50)
+    # Single-month response shape: has month, no range/trend
+    assert result["month"] == "2026-Jun"
+    assert "range" not in result
+    assert "trend" not in result
+

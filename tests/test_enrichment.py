@@ -136,3 +136,49 @@ async def test_epss_partial_batch_failure(monkeypatch):
     cves = [f"CVE-2026-{10000 + i}" for i in range(150)]
     result = await fetch_epss(cves)
     assert len(result) == 50, "second batch should still be returned"
+
+
+# --- force_refresh + freshness metadata ---
+
+
+async def test_force_refresh_bypasses_epss_cache(mock_api):
+    cves = ["CVE-2026-41108"]
+    await fetch_epss(cves)
+    await fetch_epss(cves, force_refresh=True)
+    epss_calls = [c for c in mock_api if "api.first.org" in c]
+    assert len(epss_calls) == 2, "force_refresh must re-request even when cached"
+
+
+async def test_force_refresh_bypasses_kev_cache(mock_api):
+    await fetch_kev()
+    await fetch_kev(force_refresh=True)
+    kev_calls = [c for c in mock_api if "cisa.gov" in c]
+    assert len(kev_calls) == 2, "force_refresh must re-fetch the KEV catalog"
+
+
+async def test_kev_freshness_metadata(mock_api):
+    assert enrichment.kev_freshness() == {
+        "available": False,
+        "ttl_seconds": enrichment.KEV_TTL_SECONDS,
+    }
+    await fetch_kev()
+    meta = enrichment.kev_freshness()
+    assert meta["available"] is True
+    assert meta["ttl_seconds"] == enrichment.KEV_TTL_SECONDS
+    assert meta["age_seconds"] >= 0
+    assert meta["stale"] is False
+
+
+async def test_epss_freshness_metadata(mock_api):
+    cves = ["CVE-2026-41108", "CVE-2026-99999"]  # second is unknown to EPSS
+    await fetch_epss(cves)
+    meta = enrichment.epss_freshness(cves)
+    assert meta["ttl_seconds"] == enrichment.EPSS_TTL_SECONDS
+    assert meta["requested"] == 2
+    assert meta["covered"] == 1  # only the known CVE has a score
+    assert meta["age_seconds"] >= 0
+    assert meta["stale"] is False
+
+    empty = enrichment.epss_freshness(["CVE-2026-00000"])
+    assert empty["available"] is False
+

@@ -164,6 +164,35 @@ async def test_find_month_for_cve(mock_api):
     assert await find_month_for_cve("CVE-1900-00000") is None
 
 
+async def test_force_refresh_bypasses_month_cache(mock_api):
+    await fetch_month("2026-Jun")
+    await fetch_month("2026-Jun", force_refresh=True)
+    doc_calls = [c for c in mock_api if c.endswith("/cvrf/2026-Jun")]
+    assert len(doc_calls) == 2, "force_refresh must re-fetch even when cached"
+
+
+async def test_force_refresh_bypasses_index_cache(mock_api):
+    await fetch_update_index()
+    await fetch_update_index(force_refresh=True)
+    index_calls = [c for c in mock_api if c.endswith("/updates")]
+    assert len(index_calls) == 2, "force_refresh must re-fetch the index"
+
+
+async def test_month_freshness_metadata(mock_api):
+    # Recent months (2026-Jun is newest in the index) carry a refresh TTL.
+    not_cached = await msrc_api.month_freshness("2026-Jun")
+    assert not_cached["available"] is False
+    assert not_cached["ttl_seconds"] == msrc_api.RECENT_MONTH_TTL_SECONDS
+
+    await fetch_month("2026-Jun")
+    meta = await msrc_api.month_freshness("2026-Jun")
+    assert meta["month"] == "2026-Jun"
+    assert meta["available"] is True
+    assert meta["age_seconds"] >= 0
+    assert meta["ttl_seconds"] == msrc_api.RECENT_MONTH_TTL_SECONDS
+    assert meta["stale"] is False
+
+
 async def test_slim_fetch_skips_text_and_caches_separately(mock_api):
     slim = await fetch_month("2026-Jun", slim=True)
     assert all(v.description == "" for v in slim.vulnerabilities)

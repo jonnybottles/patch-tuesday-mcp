@@ -8,6 +8,7 @@ import pytest
 from patch_tuesday_mcp.models.vulnerability import (
     MonthlyRelease,
     Vulnerability,
+    _parse_vulnerability,
     parse_cvrf,
     parse_exploit_status,
     sort_vulnerabilities,
@@ -245,3 +246,54 @@ def test_summary_omits_references_by_default_but_opts_in(release):
     vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
     assert "references" not in vuln.to_summary_dict()
     assert "references" in vuln.to_summary_dict(include_references=True)
+
+
+# --- Mitigations & workarounds (guidance) ---
+
+_GUIDANCE_RAW = {
+    "CVE": "CVE-2026-70000",
+    "Title": {"Value": "Example guidance vuln"},
+    "Remediations": [
+        {"Type": 2, "Description": {"Value": "5099999"}, "SubType": "Security Update"},
+        {
+            "Type": 1,
+            "Description": {"Value": "<p>Disable the <b>Foo</b> service.</p>"},
+            "URL": "https://msrc.microsoft.com/mitigation",
+        },
+        {"Type": 0, "Description": {"Value": "Block inbound port 445."}},
+        # Duplicate mitigation across products must be de-duplicated.
+        {"Type": 1, "Description": {"Value": "<p>Disable the <b>Foo</b> service.</p>"}},
+        {"Type": 4, "Description": {"Value": "This behavior is by design."}},
+        # None-available (type 3) with no text is not surfaced as guidance.
+        {"Type": 3, "Description": {"Value": None}, "URL": "https://support/x"},
+    ],
+}
+
+
+def test_parses_mitigation_workaround_and_will_not_fix():
+    vuln = _parse_vulnerability(_GUIDANCE_RAW, {}, {})
+    # Vendor-fix KBs remain in kb_articles, unaffected.
+    assert [k.kb for k in vuln.kb_articles] == ["5099999"]
+    types = [g.type for g in vuln.guidance]
+    assert types == ["mitigation", "workaround", "will_not_fix"]
+    mitigation = vuln.guidance[0]
+    assert mitigation.description == "Disable the Foo service."  # HTML stripped
+    assert mitigation.url == "https://msrc.microsoft.com/mitigation"
+
+
+def test_guidance_is_gated_in_detail_output():
+    vuln = _parse_vulnerability(_GUIDANCE_RAW, {}, {})
+    assert "guidance" not in vuln.to_detail_dict()
+    detail = vuln.to_detail_dict(include_guidance=True)
+    assert [g["type"] for g in detail["guidance"]] == [
+        "mitigation",
+        "workaround",
+        "will_not_fix",
+    ]
+
+
+def test_slim_parse_skips_guidance_text():
+    vuln = _parse_vulnerability(_GUIDANCE_RAW, {}, {}, include_text=False)
+    assert vuln.guidance == []
+    # KB remediation (small, always needed for chain walking) is retained.
+    assert [k.kb for k in vuln.kb_articles] == ["5099999"]

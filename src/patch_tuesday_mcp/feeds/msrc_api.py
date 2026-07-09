@@ -133,7 +133,9 @@ def patch_tuesday_utc(month_id: str) -> datetime | None:
     return datetime(year, month, first_tuesday + 7, 18, 0, tzinfo=timezone.utc)
 
 
-async def get_default_month_id(now: datetime | None = None) -> tuple[str, str | None]:
+async def get_default_month_id(
+    now: datetime | None = None, force_refresh: bool = False
+) -> tuple[str, str | None]:
     """Pick the default month for searches: the latest *released* Patch Tuesday.
 
     MSRC creates next month's document before its Patch Tuesday; until release
@@ -144,7 +146,7 @@ async def get_default_month_id(now: datetime | None = None) -> tuple[str, str | 
 
     Returns (month_id, skipped_pre_release_month_id_or_None).
     """
-    entries = await fetch_update_index()
+    entries = await fetch_update_index(force_refresh=force_refresh)
     if not entries:
         raise MsrcApiError("MSRC update index returned no security update documents")
     if now is None:
@@ -180,14 +182,15 @@ async def _get_json(url: str, timeout: float = 60.0) -> dict:
         raise MsrcApiError("MSRC API returned invalid JSON") from exc
 
 
-async def fetch_update_index() -> list[dict]:
+async def fetch_update_index(force_refresh: bool = False) -> list[dict]:
     """Fetch the list of monthly security update documents.
 
     Returns entries sorted newest-first, filtered to security update releases
     (the raw index also contains Mariner/Azure Linux release-notes documents).
+    When force_refresh is True the in-process cache is bypassed and re-fetched.
     """
     now = time.monotonic()
-    if _index_cache and now - _index_cache[0] < INDEX_TTL_SECONDS:
+    if not force_refresh and _index_cache and now - _index_cache[0] < INDEX_TTL_SECONDS:
         return _index_cache[1]
 
     data = await _get_json(f"{MSRC_API_BASE}/updates", timeout=30.0)
@@ -240,22 +243,27 @@ def _evict_oldest(cache: dict[str, tuple[float, MonthlyRelease]], max_entries: i
         del cache[oldest]
 
 
-async def fetch_month(month_id: str, slim: bool = False) -> MonthlyRelease:
+async def fetch_month(
+    month_id: str, slim: bool = False, force_refresh: bool = False
+) -> MonthlyRelease:
     """Fetch and parse a monthly CVRF document, using the cache when possible.
 
     slim=True skips descriptions/FAQs (for chain walking across many months).
     A cached full parse can satisfy a slim request, but never the reverse.
+    force_refresh=True bypasses the cache for this month and re-fetches it.
     """
-    cached = await _cached_month(month_id, slim, time.monotonic())
-    if cached is not None:
-        return cached
+    if not force_refresh:
+        cached = await _cached_month(month_id, slim, time.monotonic())
+        if cached is not None:
+            return cached
 
     lock = _month_locks.setdefault(month_id, asyncio.Lock())
     async with lock:
         # Another task may have fetched while we waited on the lock
-        cached = await _cached_month(month_id, slim, time.monotonic())
-        if cached is not None:
-            return cached
+        if not force_refresh:
+            cached = await _cached_month(month_id, slim, time.monotonic())
+            if cached is not None:
+                return cached
 
         start = time.perf_counter()
         async with _get_fetch_semaphore():
@@ -273,6 +281,35 @@ async def fetch_month(month_id: str, slim: bool = False) -> MonthlyRelease:
         cache[month_id] = (time.monotonic(), release)
         _evict_oldest(cache, MAX_SLIM_MONTHS_CACHED if slim else MAX_FULL_MONTHS_CACHED)
         return release
+
+
+async def month_freshness(month_id: str, slim: bool = False) -> dict:
+    """Freshness metadata for a cached monthly document.
+
+    Returns the cache age (seconds since fetch) and the applicable TTL. Recent
+    months carry a refresh TTL; older months are cached until evicted (TTL is
+    reported as None). Returns available=False when the month is not cached.
+    """
+    now = time.monotonic()
+    caches = [_month_cache, _slim_month_cache] if slim else [_month_cache]
+    fetched_at: float | None = None
+    for cache in caches:
+        cached = cache.get(month_id)
+        if cached:
+            fetched_at = cached[0]
+            break
+
+    ttl = RECENT_MONTH_TTL_SECONDS if await _is_recent_month(month_id) else None
+    if fetched_at is None:
+        return {"month": month_id, "available": False, "ttl_seconds": ttl}
+    age = now - fetched_at
+    return {
+        "month": month_id,
+        "available": True,
+        "age_seconds": round(age, 1),
+        "ttl_seconds": ttl,
+        "stale": ttl is not None and age >= ttl,
+    }
 
 
 async def _is_recent_month(month_id: str) -> bool:

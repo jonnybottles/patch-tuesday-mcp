@@ -13,6 +13,33 @@ from .middleware.body_limit import DEFAULT_MAX_BODY_BYTES, BodyLimitMiddleware  
 from .middleware.rate_limit import RateLimitMiddleware  # noqa: E402
 from .tools.search import msrc_search  # noqa: E402
 
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Parse a boolean environment variable (accepts 1/true/yes/on)."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+def _cors_origins() -> list[str]:
+    """Resolve the CORS allowlist from MCP_CORS_ORIGINS.
+
+    Comma-separated list of allowed origins. When unset, defaults to ``["*"]``
+    (permissive) to preserve current local-dev behavior; public deployments
+    should set an explicit allowlist (see README deployment docs).
+    """
+    raw = os.getenv("MCP_CORS_ORIGINS", "").strip()
+    if not raw:
+        return ["*"]
+    return [o.strip() for o in raw.split(",") if o.strip()]
+
+
+def _trusted_proxies() -> frozenset[str]:
+    """Resolve the trusted-proxy allowlist from MCP_TRUSTED_PROXIES."""
+    raw = os.getenv("MCP_TRUSTED_PROXIES", "").strip()
+    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
 # Create the MCP server
 mcp = FastMCP(
     "Patch Tuesday MCP",
@@ -66,7 +93,10 @@ def main():
     - Stateless streamable HTTP (safe behind multi-replica ingress)
     - Per-IP rate limiting (RATE_LIMIT_RPM, default 60; 0 disables)
     - Request body size cap (MCP_MAX_BODY_BYTES, default 256 KiB; 0 disables)
-    - Permissive CORS so browser-based MCP clients can connect
+    - Configurable CORS allowlist (MCP_CORS_ORIGINS; default "*" for local dev)
+    - Trusted-proxy client-IP handling (MCP_TRUST_X_FORWARDED_FOR,
+      MCP_TRUSTED_PROXIES) so rate limiting keys on the real client behind
+      a reverse proxy without trusting spoofable headers when directly exposed
     - Optional Application Insights telemetry
       (APPLICATIONINSIGHTS_CONNECTION_STRING)
     """
@@ -80,6 +110,9 @@ def main():
         port = int(os.getenv("MCP_PORT", "8000"))
         rpm = int(os.getenv("RATE_LIMIT_RPM", "60"))
         max_body = int(os.getenv("MCP_MAX_BODY_BYTES", str(DEFAULT_MAX_BODY_BYTES)))
+        cors_origins = _cors_origins()
+        trust_xff = _env_flag("MCP_TRUST_X_FORWARDED_FOR", True)
+        trusted_proxies = _trusted_proxies()
 
         telemetry_enabled = telemetry.setup_telemetry()
 
@@ -91,11 +124,13 @@ def main():
             app,
             requests_per_minute=rpm,
             on_request=telemetry.track_request if telemetry_enabled else None,
+            trust_x_forwarded_for=trust_xff,
+            trusted_proxies=trusted_proxies,
         )
         # CORS outermost so preflights and 429/413 responses carry CORS headers
         app = CORSMiddleware(
             app,
-            allow_origins=["*"],
+            allow_origins=cors_origins,
             allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
             allow_headers=["*"],
             expose_headers=["Mcp-Session-Id"],
@@ -105,6 +140,21 @@ def main():
         print(f"Starting Patch Tuesday MCP server on {host}:{port}")
         print(f"MCP endpoint: http://{host}:{port}/mcp")
         print(f"Rate limit: {rpm} req/min per IP" if rpm > 0 else "Rate limit: disabled")
+        cors_display = (
+            "* (all — restrict for public deploy)"
+            if cors_origins == ["*"]
+            else ", ".join(cors_origins)
+        )
+        print(f"CORS origins: {cors_display}")
+        if trust_xff:
+            proxy_display = (
+                f"via proxies {', '.join(sorted(trusted_proxies))}"
+                if trusted_proxies
+                else "rightmost hop"
+            )
+            print(f"Trusting X-Forwarded-For: {proxy_display}")
+        else:
+            print("Trusting X-Forwarded-For: no (direct peer IP only)")
         print(f"Telemetry: {'enabled' if telemetry_enabled else 'disabled'}")
         uvicorn.run(app, host=host, port=port, log_level="warning")
     else:

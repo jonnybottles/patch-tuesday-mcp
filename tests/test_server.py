@@ -3,7 +3,7 @@
 import httpx
 from fastmcp import Client
 
-from patch_tuesday_mcp import __version__
+from patch_tuesday_mcp import __version__, server
 from patch_tuesday_mcp.server import mcp
 
 
@@ -32,3 +32,37 @@ async def test_health_route():
     body = response.json()
     assert body["status"] == "ok"
     assert body["version"] == __version__
+
+
+def test_cors_origins_defaults_to_all(monkeypatch):
+    monkeypatch.delenv("MCP_CORS_ORIGINS", raising=False)
+    assert server._cors_origins() == ["*"]
+
+
+def test_cors_origins_parses_allowlist(monkeypatch):
+    monkeypatch.setenv("MCP_CORS_ORIGINS", "https://a.example.com, https://b.example.com")
+    assert server._cors_origins() == ["https://a.example.com", "https://b.example.com"]
+
+
+def test_cors_origins_blank_falls_back_to_all(monkeypatch):
+    monkeypatch.setenv("MCP_CORS_ORIGINS", "   ")
+    assert server._cors_origins() == ["*"]
+
+
+def test_trusted_proxies_parsing(monkeypatch):
+    monkeypatch.delenv("MCP_TRUSTED_PROXIES", raising=False)
+    assert server._trusted_proxies() == frozenset()
+    monkeypatch.setenv("MCP_TRUSTED_PROXIES", "10.0.0.1, 10.0.0.2 ,")
+    assert server._trusted_proxies() == frozenset({"10.0.0.1", "10.0.0.2"})
+
+
+def test_env_flag_parsing(monkeypatch):
+    monkeypatch.delenv("MCP_TRUST_X_FORWARDED_FOR", raising=False)
+    assert server._env_flag("MCP_TRUST_X_FORWARDED_FOR", True) is True
+    assert server._env_flag("MCP_TRUST_X_FORWARDED_FOR", False) is False
+    for truthy in ("1", "true", "YES", "On"):
+        monkeypatch.setenv("MCP_TRUST_X_FORWARDED_FOR", truthy)
+        assert server._env_flag("MCP_TRUST_X_FORWARDED_FOR", False) is True
+    for falsy in ("0", "false", "no", "off"):
+        monkeypatch.setenv("MCP_TRUST_X_FORWARDED_FOR", falsy)
+        assert server._env_flag("MCP_TRUST_X_FORWARDED_FOR", True) is False

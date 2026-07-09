@@ -62,13 +62,14 @@ async def _get_json(url: str, timeout: float = 30.0) -> dict:
         raise EnrichmentError("Enrichment API returned invalid JSON") from exc
 
 
-async def fetch_kev() -> dict[str, dict]:
+async def fetch_kev(force_refresh: bool = False) -> dict[str, dict]:
     """Fetch the CISA KEV catalog keyed by CVE ID.
 
-    Returns {} on failure — enrichment must never break a search.
+    Returns {} on failure — enrichment must never break a search. When
+    force_refresh is True the in-process cache is bypassed and re-fetched.
     """
     now = time.monotonic()
-    if _kev_cache and now - _kev_cache[0] < KEV_TTL_SECONDS:
+    if not force_refresh and _kev_cache and now - _kev_cache[0] < KEV_TTL_SECONDS:
         return _kev_cache[1]
 
     try:
@@ -92,12 +93,15 @@ async def fetch_kev() -> dict[str, dict]:
     return catalog
 
 
-async def fetch_epss(cves: list[str]) -> dict[str, tuple[float, float]]:
+async def fetch_epss(
+    cves: list[str], force_refresh: bool = False
+) -> dict[str, tuple[float, float]]:
     """Fetch EPSS (score, percentile) for the given CVEs, batching and caching.
 
     CVEs unknown to EPSS are absent from the result (and negatively cached so
     they are not re-requested within the TTL). Partial results are returned
-    when some batches fail.
+    when some batches fail. When force_refresh is True cached entries for the
+    requested CVEs are ignored and re-fetched.
     """
     now = time.monotonic()
     results: dict[str, tuple[float, float]] = {}
@@ -109,7 +113,7 @@ async def fetch_epss(cves: list[str]) -> dict[str, tuple[float, float]]:
             continue
         seen.add(cve)
         cached = _epss_cache.get(cve)
-        if cached and now - cached[0] < EPSS_TTL_SECONDS:
+        if not force_refresh and cached and now - cached[0] < EPSS_TTL_SECONDS:
             if cached[1] is not None:
                 results[cve] = cached[1]
         else:
@@ -141,3 +145,57 @@ async def fetch_epss(cves: list[str]) -> dict[str, tuple[float, float]]:
                 results[cve] = fetched[cve]
 
     return results
+
+
+def kev_freshness() -> dict:
+    """Freshness metadata for the KEV catalog cache.
+
+    Returns age of the cached catalog (seconds since fetch), its TTL, and
+    whether catalog data is currently available.
+    """
+    if not _kev_cache:
+        return {"available": False, "ttl_seconds": KEV_TTL_SECONDS}
+    age = time.monotonic() - _kev_cache[0]
+    return {
+        "available": True,
+        "age_seconds": round(age, 1),
+        "ttl_seconds": KEV_TTL_SECONDS,
+        "stale": age >= KEV_TTL_SECONDS,
+    }
+
+
+def epss_freshness(cves: list[str]) -> dict:
+    """Freshness metadata for EPSS scores covering the given CVEs.
+
+    Reports the oldest cache age across the requested CVEs (the worst case),
+    the TTL, and how many of the requested CVEs have a cached EPSS score.
+    """
+    now = time.monotonic()
+    ages: list[float] = []
+    covered = 0
+    requested = 0
+    seen: set[str] = set()
+    for cve in cves:
+        if not cve or cve in seen:
+            continue
+        seen.add(cve)
+        requested += 1
+        entry = _epss_cache.get(cve)
+        if entry is None:
+            continue
+        ages.append(now - entry[0])
+        if entry[1] is not None:
+            covered += 1
+
+    meta: dict = {
+        "ttl_seconds": EPSS_TTL_SECONDS,
+        "requested": requested,
+        "covered": covered,
+    }
+    if ages:
+        oldest = max(ages)
+        meta["age_seconds"] = round(oldest, 1)
+        meta["stale"] = oldest >= EPSS_TTL_SECONDS
+    else:
+        meta["available"] = False
+    return meta

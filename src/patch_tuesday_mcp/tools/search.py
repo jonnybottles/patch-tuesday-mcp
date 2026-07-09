@@ -17,6 +17,7 @@ from ..models.vulnerability import (
     compute_stats,
     sort_vulnerabilities,
 )
+from . import formatters
 
 _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 
@@ -29,6 +30,14 @@ CHAIN_MAX_DEPTH = 12
 CHAIN_SCAN_MONTHS = 24
 
 MAX_LIMIT = 100
+
+# Output formats for the monthly search view. "json" (default) is the most
+# complete; "markdown"/"csv" add an additive triage rendering of the page.
+OUTPUT_FORMATS = {"json", "markdown", "csv"}
+REPORT_KINDS = {None, "triage"}
+
+# Historical trend search: how many released months a single request may span.
+MAX_TREND_MONTHS = 12
 
 # Allowed single-letter values for the CVSS v3.x base-metric filters.
 CVSS_FILTER_VALUES = {
@@ -56,6 +65,14 @@ async def msrc_search(
     user_interaction: str | None = None,
     scope: str | None = None,
     include_chain: bool = False,
+    include_guidance: bool = False,
+    format: str = "json",
+    report: str | None = None,
+    force_refresh: bool = False,
+    include_freshness: bool = False,
+    months_back: int | None = None,
+    start_month: str | None = None,
+    end_month: str | None = None,
     limit: Annotated[int, Field(ge=0, le=MAX_LIMIT)] = 10,
     offset: Annotated[int, Field(ge=0)] = 0,
     include_stats: bool = False,
@@ -95,6 +112,9 @@ async def msrc_search(
     - Filter by CVSS score (min_cvss=8.0)
     - Look at a past month (month="2026-Apr" or month="2026-04")
     - Combine filters (product="Exchange" + severity="Critical" + month="2026-05")
+    - Search a historical range (query="HTTP.sys" + months_back=6, or
+      start_month="2026-Jan" + end_month="2026-Jun") -- aggregates matching
+      CVEs across released months with per-month trend counts
     - Paginate with offset (offset=10, limit=10 for page 2)
 
     Args:
@@ -136,6 +156,36 @@ async def msrc_search(
         include_chain: When True together with kb=, adds a supersedence_chain
             showing which KBs this KB replaces (newest to oldest), walked from
             Microsoft-stated supersedence links. Ignored without kb=.
+        include_guidance: When True together with cve=, adds a guidance list to
+            the CVE detail output with any Microsoft-provided mitigations,
+            workarounds, and will-not-fix advisories (type/description/url).
+            Omitted by default to keep responses lean. Ignored without cve=.
+        format: Output format for a monthly/filtered search: "json" (default,
+            most complete), "markdown", or "csv". "markdown" adds a prioritized
+            triage briefing (executive summary + table) under a markdown key;
+            "csv" adds a spreadsheet-ready table under a csv key plus a columns
+            list. The JSON vulnerabilities list is always included. Ignored for
+            cve=/kb= fast-path lookups.
+        report: Optional report profile for format="markdown"/"csv". Currently
+            only "triage" (the default rendering) is supported; reserved for
+            future report shapes.
+        force_refresh: When True, bypass the in-process caches for this request
+            and re-fetch the MSRC document and EPSS/KEV enrichment from source.
+            Use to pick up a same-day MSRC revision or fresh EPSS/KEV data.
+            Only the data needed for this request is refreshed; unrelated cached
+            months are left intact.
+        include_freshness: When True (or when force_refresh is used), add a
+            freshness block to the response reporting the cache age and TTL of
+            the MSRC document and the EPSS/KEV enrichment data.
+        months_back: Optional historical-trend control; search the N most recent
+            released months (N >= 1) instead of a single month, aggregating
+            matches with per-month counts. Mutually exclusive with
+            start_month/end_month. Capped at 12 months per request.
+        start_month: Optional start of a historical-trend range (e.g. "2026-Jan"
+            or "2026-01"), inclusive. When end_month is omitted the range runs
+            through the latest released month. Capped at 12 months.
+        end_month: Optional end of a historical-trend range (inclusive); requires
+            start_month (or months_back). Pre-release months are excluded.
         limit: Maximum number of results to return (default: 10, max: 100).
             Set to 0 with include_stats=True for a stats-only month overview.
         offset: Number of results to skip for pagination (default: 0).
@@ -154,6 +204,18 @@ async def msrc_search(
         - stats: (only when include_stats=True) aggregate counts
         - supersedence_chain / chain_complete: (only for kb= lookups with
           include_chain=True) the walked chain, newest to oldest
+        - guidance: (only for cve= lookups with include_guidance=True) list of
+          mitigation/workaround/will-not-fix advisories, when Microsoft
+          provides them
+        - format / markdown / csv / columns: (only when format="markdown" or
+          "csv") the chosen format plus the rendered triage view; csv also
+          carries the stable column-name list
+        - freshness: (only with include_freshness=True or force_refresh=True)
+          cache age/TTL for the MSRC document and EPSS/KEV enrichment
+        - range / months_searched / trend: (only for historical-trend searches
+          via months_back or start_month/end_month) the resolved month range,
+          the number of months searched, and per-month aggregate counts
+          (total, by_severity, exploited, publicly_disclosed, kev)
         - error / error_kind: (only on failure) a message plus a category
           (invalid_input, not_found, upstream)
         - note: (when relevant) explains month selection, e.g. that a newer
@@ -179,6 +241,14 @@ async def msrc_search(
         user_interaction=user_interaction,
         scope=scope,
         include_chain=include_chain,
+        include_guidance=include_guidance,
+        format=format,
+        report=report,
+        force_refresh=force_refresh,
+        include_freshness=include_freshness,
+        months_back=months_back,
+        start_month=start_month,
+        end_month=end_month,
         limit=limit,
         offset=offset,
         include_stats=include_stats,
@@ -210,17 +280,25 @@ async def _search_impl(
     user_interaction: str | None,
     scope: str | None,
     include_chain: bool,
+    include_guidance: bool,
+    format: str,
+    report: str | None,
+    force_refresh: bool,
+    include_freshness: bool,
+    months_back: int | None,
+    start_month: str | None,
+    end_month: str | None,
     limit: int,
     offset: int,
     include_stats: bool,
 ) -> dict:
     # --- CVE fast path: cross-month single-CVE detail lookup ---
     if cve:
-        return await _lookup_cve(cve)
+        return await _lookup_cve(cve, include_guidance, force_refresh)
 
     # --- KB fast path: which CVEs does this KB fix ---
     if kb:
-        return await _lookup_kb(kb, include_chain, month, limit, offset)
+        return await _lookup_kb(kb, include_chain, month, limit, offset, force_refresh)
 
     filters_applied = _build_filters_summary(
         query=query,
@@ -236,10 +314,28 @@ async def _search_impl(
         privileges_required=privileges_required,
         user_interaction=user_interaction,
         scope=scope,
+        format=format if format != "json" else None,
+        report=report,
+        force_refresh=force_refresh if force_refresh else None,
+        months_back=months_back,
+        start_month=start_month,
+        end_month=end_month,
         offset=offset,
     )
 
     # Validate inputs before any network call
+    fmt = (format or "json").lower()
+    if fmt not in OUTPUT_FORMATS:
+        return _error(
+            f"Invalid format: {format!r}. Valid values: {', '.join(sorted(OUTPUT_FORMATS))}.",
+            filters_applied,
+        )
+    if report not in REPORT_KINDS:
+        valid = ", ".join(sorted(r for r in REPORT_KINDS if r))
+        return _error(
+            f"Invalid report: {report!r}. Valid values: {valid}.",
+            filters_applied,
+        )
     if severity is not None:
         severity = severity.capitalize()
         if severity not in SEVERITY_ORDER:
@@ -266,20 +362,46 @@ async def _search_impl(
             )
         vector_filters[name] = normalized
 
+    limit = max(0, min(limit, MAX_LIMIT))
+    offset = max(0, offset)
+
+    # --- Historical trend path: aggregate across a range of released months ---
+    if months_back is not None or start_month is not None or end_month is not None:
+        return await _trend_search(
+            filters_applied=filters_applied,
+            query=query,
+            product=product,
+            severity=severity,
+            exploited=exploited,
+            publicly_disclosed=publicly_disclosed,
+            kev=kev,
+            min_epss=min_epss,
+            min_cvss=min_cvss,
+            vector_filters=vector_filters,
+            months_back=months_back,
+            start_month=start_month,
+            end_month=end_month,
+            fmt=fmt,
+            force_refresh=force_refresh,
+            include_freshness=include_freshness,
+            limit=limit,
+            offset=offset,
+            include_stats=include_stats,
+        )
+
     month_id: str | None = None
     if month is not None:
         month_id = msrc_api.normalize_month_id(month)
         if month_id is None:
             return _invalid_month_error(month, filters_applied)
 
-    limit = max(0, min(limit, MAX_LIMIT))
-    offset = max(0, offset)
-
     skipped_pre_release: str | None = None
     try:
         if month_id is None:
-            month_id, skipped_pre_release = await msrc_api.get_default_month_id()
-        release = await msrc_api.fetch_month(month_id)
+            month_id, skipped_pre_release = await msrc_api.get_default_month_id(
+                force_refresh=force_refresh
+            )
+        release = await msrc_api.fetch_month(month_id, force_refresh=force_refresh)
     except MsrcApiError as exc:
         if "not found" in str(exc):
             return _error(
@@ -291,7 +413,7 @@ async def _search_impl(
 
     # Enrich the whole month (not just the returned page) so KEV/EPSS
     # filtering and sorting stay consistent across pagination
-    await _enrich(release.vulnerabilities)
+    await _enrich(release.vulnerabilities, force_refresh=force_refresh)
 
     matched = _filter_vulnerabilities(
         release.vulnerabilities,
@@ -322,6 +444,26 @@ async def _search_impl(
     if include_stats:
         response["stats"] = compute_stats(matched)
 
+    if fmt != "json":
+        page = matched[offset : offset + limit]
+        response["format"] = fmt
+        if fmt == "markdown":
+            response["markdown"] = formatters.render_markdown(
+                page, _release_header(release), len(matched), all_vulns=matched
+            )
+        elif fmt == "csv":
+            response["csv"] = formatters.render_csv(page)
+            response["columns"] = list(formatters.TRIAGE_COLUMNS)
+
+    if include_freshness or force_refresh:
+        response["freshness"] = {
+            "msrc": await msrc_api.month_freshness(month_id),
+            "epss": enrichment.epss_freshness([v.cve for v in matched]),
+            "kev": enrichment.kev_freshness(),
+        }
+        if force_refresh:
+            response["freshness"]["force_refresh"] = True
+
     if skipped_pre_release:
         release_time = msrc_api.patch_tuesday_utc(skipped_pre_release)
         response["note"] = (
@@ -343,12 +485,201 @@ async def _search_impl(
     return response
 
 
-async def _enrich(vulnerabilities: list[Vulnerability]) -> None:
+def _trend_entry(release: MonthlyRelease, matched: list[Vulnerability]) -> dict:
+    """Compact per-month aggregate for a historical-trend response."""
+    stats = compute_stats(matched)
+    return {
+        "month": release.id,
+        "title": release.title,
+        "total": len(matched),
+        "by_severity": stats["by_severity"],
+        "exploited": stats["exploited"],
+        "publicly_disclosed": stats["publicly_disclosed"],
+        "kev": stats["kev"],
+    }
+
+
+async def _trend_search(
+    *,
+    filters_applied: dict,
+    query: str | None,
+    product: str | None,
+    severity: str | None,
+    exploited: bool | None,
+    publicly_disclosed: bool | None,
+    kev: bool | None,
+    min_epss: float | None,
+    min_cvss: float | None,
+    vector_filters: dict[str, str],
+    months_back: int | None,
+    start_month: str | None,
+    end_month: str | None,
+    fmt: str,
+    force_refresh: bool,
+    include_freshness: bool,
+    limit: int,
+    offset: int,
+    include_stats: bool,
+) -> dict:
+    """Aggregate matching vulnerabilities across a range of released months."""
+    if months_back is not None and (start_month is not None or end_month is not None):
+        return _error(
+            "Specify either months_back or start_month/end_month, not both.",
+            filters_applied,
+        )
+    if months_back is not None and months_back < 1:
+        return _error("months_back must be >= 1.", filters_applied)
+    if months_back is not None and months_back > MAX_TREND_MONTHS:
+        return _error(
+            f"months_back={months_back} exceeds the maximum range; the maximum "
+            f"is {MAX_TREND_MONTHS} months.",
+            filters_applied,
+        )
+    if end_month is not None and start_month is None and months_back is None:
+        return _error(
+            "end_month requires start_month (or use months_back).", filters_applied
+        )
+
+    start_id: str | None = None
+    end_id: str | None = None
+    if start_month is not None:
+        start_id = msrc_api.normalize_month_id(start_month)
+        if start_id is None:
+            return _invalid_month_error(start_month, filters_applied)
+    if end_month is not None:
+        end_id = msrc_api.normalize_month_id(end_month)
+        if end_id is None:
+            return _invalid_month_error(end_month, filters_applied)
+
+    now = msrc_api.utcnow()
+    try:
+        entries = await msrc_api.fetch_update_index(force_refresh=force_refresh)
+    except MsrcApiError as exc:
+        return _error(str(exc), filters_applied, kind="upstream")
+
+    # Released months only (newest-first, matching fetch_update_index ordering)
+    released = [
+        e
+        for e in entries
+        if (rt := msrc_api.patch_tuesday_utc(e["id"])) is not None and rt <= now
+    ]
+    if not released:
+        return _error(
+            "No released monthly security updates found.",
+            filters_applied,
+            kind="not_found",
+        )
+
+    if months_back is not None:
+        selected = released[:months_back]
+    else:
+        start_dt = msrc_api.patch_tuesday_utc(start_id)
+        end_dt = msrc_api.patch_tuesday_utc(end_id) if end_id else now
+        if start_dt is None or end_dt is None:
+            return _error("Invalid month range.", filters_applied)
+        if start_dt > end_dt:
+            return _error(
+                "start_month must be on or before end_month.", filters_applied
+            )
+        selected = [
+            e for e in released if start_dt <= msrc_api.patch_tuesday_utc(e["id"]) <= end_dt
+        ]
+
+    if not selected:
+        return _error(
+            "No released months matched the requested range.",
+            filters_applied,
+            kind="not_found",
+        )
+    if len(selected) > MAX_TREND_MONTHS:
+        return _error(
+            f"Requested range spans {len(selected)} months; the maximum is "
+            f"{MAX_TREND_MONTHS}. Narrow the range with months_back or "
+            "start_month/end_month.",
+            filters_applied,
+        )
+
+    try:
+        releases = await asyncio.gather(
+            *(msrc_api.fetch_month(e["id"], force_refresh=force_refresh) for e in selected)
+        )
+    except MsrcApiError as exc:
+        return _error(str(exc), filters_applied, kind="upstream")
+
+    # Enrich the whole range once so KEV/EPSS filtering and sorting stay
+    # consistent across months and pagination.
+    all_vulns = [v for release in releases for v in release.vulnerabilities]
+    await _enrich(all_vulns, force_refresh=force_refresh)
+
+    include_cvss = bool(vector_filters)
+    trend: list[dict] = []
+    combined: list[Vulnerability] = []
+    for release in releases:
+        month_matched = _filter_vulnerabilities(
+            release.vulnerabilities,
+            query=query,
+            product=product,
+            severity=severity,
+            exploited=exploited,
+            publicly_disclosed=publicly_disclosed,
+            kev=kev,
+            min_epss=min_epss,
+            min_cvss=min_cvss,
+            vector_filters=vector_filters,
+        )
+        combined.extend(month_matched)
+        trend.append(_trend_entry(release, month_matched))
+
+    combined = sort_vulnerabilities(combined)
+    page = combined[offset : offset + limit]
+
+    response: dict = {
+        "range": {
+            "start": selected[-1]["id"],
+            "end": selected[0]["id"],
+            "months": [e["id"] for e in selected],
+        },
+        "months_searched": len(selected),
+        "total_found": len(combined),
+        "vulnerabilities": [v.to_summary_dict(include_cvss=include_cvss) for v in page],
+        "trend": trend,
+        "filters_applied": filters_applied,
+    }
+    if include_stats:
+        response["stats"] = compute_stats(combined)
+
+    if fmt != "json":
+        response["format"] = fmt
+        header = {
+            "month": f"{selected[-1]['id']} → {selected[0]['id']}",
+            "title": "Historical Trend",
+        }
+        if fmt == "markdown":
+            response["markdown"] = formatters.render_markdown(
+                page, header, len(combined), all_vulns=combined
+            )
+        elif fmt == "csv":
+            response["csv"] = formatters.render_csv(page)
+            response["columns"] = list(formatters.TRIAGE_COLUMNS)
+
+    if include_freshness or force_refresh:
+        response["freshness"] = {
+            "msrc": [await msrc_api.month_freshness(e["id"]) for e in selected],
+            "epss": enrichment.epss_freshness([v.cve for v in all_vulns]),
+            "kev": enrichment.kev_freshness(),
+        }
+        if force_refresh:
+            response["freshness"]["force_refresh"] = True
+
+    return response
+
+
+async def _enrich(vulnerabilities: list[Vulnerability], force_refresh: bool = False) -> None:
     """Attach KEV and EPSS data in place. Best-effort: fetch failures leave
     the enrichment fields unset and never raise."""
     kev_map, epss_map = await asyncio.gather(
-        enrichment.fetch_kev(),
-        enrichment.fetch_epss([v.cve for v in vulnerabilities]),
+        enrichment.fetch_kev(force_refresh=force_refresh),
+        enrichment.fetch_epss([v.cve for v in vulnerabilities], force_refresh=force_refresh),
     )
     for v in vulnerabilities:
         kev_entry = kev_map.get(v.cve)
@@ -359,9 +690,15 @@ async def _enrich(vulnerabilities: list[Vulnerability]) -> None:
             v.epss_score, v.epss_percentile = scores
 
 
-async def _lookup_cve(cve: str) -> dict:
+async def _lookup_cve(
+    cve: str, include_guidance: bool = False, force_refresh: bool = False
+) -> dict:
     cve = cve.strip().upper()
-    filters_applied = {"cve": cve}
+    filters_applied: dict = {"cve": cve}
+    if include_guidance:
+        filters_applied["include_guidance"] = True
+    if force_refresh:
+        filters_applied["force_refresh"] = True
     if not _CVE_RE.match(cve):
         return _error(
             f"Invalid CVE format: {cve!r}. Expected e.g. 'CVE-2026-41108'.",
@@ -376,7 +713,7 @@ async def _lookup_cve(cve: str) -> dict:
                 filters_applied,
                 kind="not_found",
             )
-        release = await msrc_api.fetch_month(month_id)
+        release = await msrc_api.fetch_month(month_id, force_refresh=force_refresh)
     except MsrcApiError as exc:
         return _error(str(exc), filters_applied, kind="upstream")
 
@@ -388,12 +725,12 @@ async def _lookup_cve(cve: str) -> dict:
             kind="not_found",
         )
 
-    await _enrich([vuln])
+    await _enrich([vuln], force_refresh=force_refresh)
 
     return {
         **_release_header(release),
         "total_found": 1,
-        "vulnerabilities": [vuln.to_detail_dict()],
+        "vulnerabilities": [vuln.to_detail_dict(include_guidance=include_guidance)],
         "filters_applied": filters_applied,
     }
 
@@ -404,6 +741,7 @@ async def _lookup_kb(
     month: str | None = None,
     limit: int = 10,
     offset: int = 0,
+    force_refresh: bool = False,
 ) -> dict:
     kb_number = kb.strip().upper().removeprefix("KB").strip()
     filters_applied = {"kb": f"KB{kb_number}"}
@@ -411,6 +749,8 @@ async def _lookup_kb(
         filters_applied["month"] = month
     if include_chain:
         filters_applied["include_chain"] = True
+    if force_refresh:
+        filters_applied["force_refresh"] = True
     if not kb_number.isdigit():
         return _error(
             f"Invalid KB number: {kb!r}. Expected e.g. '5094123' or 'KB5094123'.",
@@ -427,7 +767,7 @@ async def _lookup_kb(
     offset = max(0, offset)
 
     try:
-        entries = await msrc_api.fetch_update_index()
+        entries = await msrc_api.fetch_update_index(force_refresh=force_refresh)
     except MsrcApiError as exc:
         return _error(str(exc), filters_applied, kind="upstream")
 
@@ -444,14 +784,14 @@ async def _lookup_kb(
 
     for entry in candidates:
         try:
-            release = await msrc_api.fetch_month(entry["id"])
+            release = await msrc_api.fetch_month(entry["id"], force_refresh=force_refresh)
         except MsrcApiError:
             continue
         matched = [
             v for v in release.vulnerabilities if any(k.kb == kb_number for k in v.kb_articles)
         ]
         if matched:
-            await _enrich(matched)
+            await _enrich(matched, force_refresh=force_refresh)
             matched = sort_vulnerabilities(matched)
             response = {
                 **_release_header(release),

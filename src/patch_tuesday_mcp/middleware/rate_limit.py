@@ -23,6 +23,18 @@ class RateLimitMiddleware:
             allowed request (used for telemetry).
         exempt_paths: Paths that bypass rate limiting and the on_request
             callback (health probes must not consume budget or be counted).
+        trust_x_forwarded_for: When True, the ``X-Forwarded-For`` header is
+            consulted to determine the client IP (the server is behind a
+            reverse proxy / ingress). When False, only the direct TCP peer is
+            used and the header is ignored — the correct choice when the
+            server is directly exposed, since anyone could otherwise spoof the
+            header to evade or poison the limiter.
+        trusted_proxies: Optional set of proxy IPs. When non-empty,
+            ``X-Forwarded-For`` is only honored if the direct peer is one of
+            these proxies, and the resolved client is the right-most hop that
+            is *not* itself a trusted proxy (so chained proxies are unwound
+            correctly). When empty, the right-most hop appended by the single
+            ingress proxy in front of us is trusted.
     """
 
     def __init__(
@@ -31,29 +43,53 @@ class RateLimitMiddleware:
         requests_per_minute: int = 60,
         on_request=None,
         exempt_paths: frozenset[str] = frozenset({"/health"}),
+        trust_x_forwarded_for: bool = True,
+        trusted_proxies: frozenset[str] = frozenset(),
     ):
         self.app = app
         self.rpm = requests_per_minute
         self.on_request = on_request
         self.exempt_paths = exempt_paths
+        self.trust_x_forwarded_for = trust_x_forwarded_for
+        self.trusted_proxies = trusted_proxies
         # ip -> [tokens, last_refill_monotonic]
         self._buckets: dict[str, list[float]] = {}
 
     def _client_ip(self, scope) -> str:
+        client = scope.get("client")
+        direct = client[0] if client else "unknown"
+
+        # Directly exposed (or explicitly told not to trust proxy headers):
+        # the header is attacker-controlled, so ignore it entirely.
+        if not self.trust_x_forwarded_for:
+            return direct
+
         headers = {
             k.decode("latin-1").lower(): v.decode("latin-1") for k, v in scope.get("headers", [])
         }
         forwarded = headers.get("x-forwarded-for")
-        if forwarded:
-            # Rightmost entry is the hop appended by the trusted ingress
-            # proxy in front of us. Earlier entries are client-supplied and
-            # spoofable — trusting them would let anyone bypass the limit
-            # and flood the bucket table.
-            ip = forwarded.split(",")[-1].strip()
-            if ip:
-                return ip
-        client = scope.get("client")
-        return client[0] if client else "unknown"
+        if not forwarded:
+            return direct
+        hops = [h.strip() for h in forwarded.split(",") if h.strip()]
+        if not hops:
+            return direct
+
+        # No explicit proxy allowlist: trust the right-most hop, which is the
+        # one appended by the single ingress proxy in front of us. Earlier
+        # entries are client-supplied and spoofable.
+        if not self.trusted_proxies:
+            return hops[-1]
+
+        # With an allowlist, only honor the header when the request actually
+        # reached us via a known proxy; otherwise the peer forged it.
+        if direct not in self.trusted_proxies:
+            return direct
+        # Unwind trusted proxies from the right: the first hop that is not a
+        # trusted proxy is the real client.
+        for hop in reversed(hops):
+            if hop not in self.trusted_proxies:
+                return hop
+        return hops[0]
 
     def _allow(self, ip: str) -> bool:
         now = time.monotonic()

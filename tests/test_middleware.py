@@ -82,6 +82,48 @@ async def test_spoofed_forwarded_for_cannot_evade_limit():
     assert await _call(mw, scope) == 429
 
 
+async def test_xff_ignored_when_not_trusted():
+    """With trust disabled, only the direct peer IP keys the bucket."""
+    mw = RateLimitMiddleware(_ok_app, requests_per_minute=2, trust_x_forwarded_for=False)
+    # Different XFF values but same direct peer -> same bucket
+    for i in range(2):
+        assert await _call(mw, _http_scope(ip="10.0.0.1", forwarded=f"203.0.113.{i}")) == 200
+    assert await _call(mw, _http_scope(ip="10.0.0.1", forwarded="203.0.113.9")) == 429
+    # A genuinely different peer is independent
+    assert await _call(mw, _http_scope(ip="10.0.0.2", forwarded="203.0.113.9")) == 200
+
+
+async def test_trusted_proxies_unwinds_to_real_client():
+    """With a proxy allowlist, the client is the right-most non-proxy hop."""
+    mw = RateLimitMiddleware(
+        _ok_app,
+        requests_per_minute=2,
+        trusted_proxies=frozenset({"10.0.0.1", "198.51.100.1"}),
+    )
+    # Peer is a trusted proxy; both trailing hops are trusted proxies, so the
+    # real client is 203.0.113.7
+    scope = _http_scope(ip="10.0.0.1", forwarded="203.0.113.7, 198.51.100.1")
+    for _ in range(2):
+        assert await _call(mw, scope) == 200
+    assert await _call(mw, scope) == 429
+    # A different real client behind the same proxy chain is independent
+    other = _http_scope(ip="10.0.0.1", forwarded="203.0.113.8, 198.51.100.1")
+    assert await _call(mw, other) == 200
+
+
+async def test_untrusted_peer_ignores_forwarded_for():
+    """If the request did not arrive via a known proxy, XFF is not honored."""
+    mw = RateLimitMiddleware(
+        _ok_app,
+        requests_per_minute=2,
+        trusted_proxies=frozenset({"10.0.0.1"}),
+    )
+    # Peer 9.9.9.9 is NOT a trusted proxy -> XFF ignored, keyed on peer
+    for i in range(2):
+        assert await _call(mw, _http_scope(ip="9.9.9.9", forwarded=f"1.2.3.{i}")) == 200
+    assert await _call(mw, _http_scope(ip="9.9.9.9", forwarded="1.2.3.99")) == 429
+
+
 async def test_bucket_hard_cap_evicts_oldest(monkeypatch):
     """A flood of distinct client IPs must not grow the bucket table unboundedly."""
     monkeypatch.setattr(rate_limit, "PRUNE_THRESHOLD", 5)
