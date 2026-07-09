@@ -18,6 +18,8 @@ Patch Tuesday MCP Server bridges Microsoft's official CVRF security update API a
 - **Track zero-days** - "Were any publicly disclosed vulnerabilities patched in April?"
 - **See what's confirmed exploited** - "Which of this month's CVEs are on the CISA KEV list?" — with federal remediation due dates
 - **Rank by exploitation probability** - "Show me CVEs with EPSS above 50%" — daily FIRST.org exploit prediction scores
+- **Find zero-click, internet-reachable criticals** - "Which Critical CVEs are network-reachable with no privileges and no user interaction?" — filter on the parsed CVSS attack vector, privileges, and user-interaction fields
+- **Jump straight to authoritative sources** - every CVE detail carries ready-to-open MSRC, NVD, EPSS, and (when listed) CISA KEV reference links
 - **Avoid stale patches** - "Is KB5087538 superseded by anything newer?" — walks Microsoft's supersedence links
 - **Prioritize patching** - Results are sorted most-urgent-first: KEV/exploited, then EPSS, then severity, then CVSS
 
@@ -36,7 +38,8 @@ Data comes from the official, public [MSRC CVRF v3 API](https://github.com/micro
 | "Which vulnerabilities does KB5094123 fix?" | ❌ no KB awareness | ✅ KB ↔ CVE mapping |
 | "What's being exploited in the wild right now?" | ⚠️ per-CVE only, if you already know the CVE | ✅ filter the whole month |
 | "What do I patch first?" | ❌ | ✅ urgency-sorted: exploited/KEV → EPSS → severity → CVSS |
-| "Tell me about CVE-X" | ✅ (often with more ecosystem data) | ✅ MSRC detail: KBs, builds, supersedence |
+| "Which criticals are zero-click and internet-reachable?" | ⚠️ per-CVE CVSS only | ✅ filter the month by parsed CVSS attack vector / privileges / user interaction |
+| "Tell me about CVE-X" | ✅ (often with more ecosystem data) | ✅ MSRC detail: KBs, builds, supersedence, parsed CVSS, MSRC/NVD/EPSS/KEV links |
 
 Under the hood, the difference is the data source: this server parses the full **MSRC CVRF monthly documents** — the ProductTree, per-product severity threats, exploitability assessments, and KB remediation chains that per-CVE APIs never expose. That's what makes release-centric questions possible.
 
@@ -124,7 +127,7 @@ pip install --upgrade patch-tuesday-mcp
 
 ## Features
 
-- **msrc_search** – Search and filter Microsoft security updates by keyword, CVE, KB number, month, product, severity, CVSS score, exploited-in-the-wild status, or public disclosure. When no month is given, results default to the most recent release whose Patch Tuesday has already occurred — the upcoming month's pre-release document (early Chromium/out-of-band entries only) is skipped by default and available explicitly via `month=`. Results are enriched with **EPSS scores** (FIRST.org 30-day exploitation probability, `min_epss=0.5` filter) and **CISA KEV** catalog status with federal remediation due dates (`kev=True` filter) — both public, keyless sources. Add `include_chain=True` to a KB lookup to walk Microsoft-stated **supersedence chains** (which KBs it replaces, newest → oldest). Set `include_stats=True` for aggregate counts (by severity, impact, product family, exploited, KEV). Use `limit=0` with `include_stats=True` for a stats-only month overview.
+- **msrc_search** – Search and filter Microsoft security updates by keyword, CVE, KB number, month, product, severity, CVSS score, exploited-in-the-wild status, or public disclosure. When no month is given, results default to the most recent release whose Patch Tuesday has already occurred — the upcoming month's pre-release document (early Chromium/out-of-band entries only) is skipped by default and available explicitly via `month=`. Results are enriched with **EPSS scores** (FIRST.org 30-day exploitation probability, `min_epss=0.5` filter) and **CISA KEV** catalog status with federal remediation due dates (`kev=True` filter) — both public, keyless sources. Filter by the **parsed CVSS v3.x exposure fields** — `attack_vector` (N/A/L/P), `privileges_required` (N/L/H), `user_interaction` (N/R), and `scope` (U/C) — to isolate, for example, network-reachable zero-click criticals; matching results surface a structured `cvss` object broken out from the raw vector string. Every CVE detail also includes a **references** block of ready-to-open links (MSRC update guide, NVD, EPSS API, and the CISA KEV catalog when the CVE is listed). Add `include_chain=True` to a KB lookup to walk Microsoft-stated **supersedence chains** (which KBs it replaces, newest → oldest). Set `include_stats=True` for aggregate counts (by severity, impact, product family, exploited, KEV). Use `limit=0` with `include_stats=True` for a stats-only month overview.
 
 ## Prompt Examples
 
@@ -138,7 +141,9 @@ Once connected to an MCP client, you can ask questions like:
 6. **Patch prioritization**: "What should I patch first from the June 2026 updates?"
 7. **CISA KEV**: "Which of this month's CVEs are on the CISA KEV list?"
 8. **EPSS**: "Show me CVEs with EPSS above 50%"
-9. **Supersedence**: "Is KB5087538 superseded by anything newer?"
+9. **Exposure filtering**: "Which Critical CVEs are network-reachable with no privileges and no user interaction?"
+10. **Reference links**: "Give me the MSRC, NVD, and EPSS links for CVE-2026-41108"
+11. **Supersedence**: "Is KB5087538 superseded by anything newer?"
 
 ## Usage
 

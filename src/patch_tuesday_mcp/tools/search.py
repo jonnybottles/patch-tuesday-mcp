@@ -30,6 +30,14 @@ CHAIN_SCAN_MONTHS = 24
 
 MAX_LIMIT = 100
 
+# Allowed single-letter values for the CVSS v3.x base-metric filters.
+CVSS_FILTER_VALUES = {
+    "attack_vector": {"N", "A", "L", "P"},
+    "privileges_required": {"N", "L", "H"},
+    "user_interaction": {"N", "R"},
+    "scope": {"U", "C"},
+}
+
 
 async def msrc_search(
     query: str | None = None,
@@ -43,6 +51,10 @@ async def msrc_search(
     kev: bool | None = None,
     min_epss: Annotated[float | None, Field(ge=0, le=1)] = None,
     min_cvss: Annotated[float | None, Field(ge=0, le=10)] = None,
+    attack_vector: str | None = None,
+    privileges_required: str | None = None,
+    user_interaction: str | None = None,
+    scope: str | None = None,
     include_chain: bool = False,
     limit: Annotated[int, Field(ge=0, le=MAX_LIMIT)] = 10,
     offset: Annotated[int, Field(ge=0)] = 0,
@@ -113,6 +125,14 @@ async def msrc_search(
         min_epss: Optional minimum EPSS score (0-1), the probability of
             exploitation in the next 30 days (e.g. 0.5 for >= 50%).
         min_cvss: Optional minimum CVSS base score (0-10).
+        attack_vector: Optional CVSS attack-vector filter, one of N (network),
+            A (adjacent), L (local), P (physical). Matches the parsed CVSS v3.x
+            vector; entries without a parseable vector are excluded.
+        privileges_required: Optional CVSS privileges-required filter, one of
+            N (none), L (low), H (high).
+        user_interaction: Optional CVSS user-interaction filter, one of
+            N (none), R (required).
+        scope: Optional CVSS scope filter, one of U (unchanged), C (changed).
         include_chain: When True together with kb=, adds a supersedence_chain
             showing which KBs this KB replaces (newest to oldest), walked from
             Microsoft-stated supersedence links. Ignored without kb=.
@@ -154,6 +174,10 @@ async def msrc_search(
         kev=kev,
         min_epss=min_epss,
         min_cvss=min_cvss,
+        attack_vector=attack_vector,
+        privileges_required=privileges_required,
+        user_interaction=user_interaction,
+        scope=scope,
         include_chain=include_chain,
         limit=limit,
         offset=offset,
@@ -181,6 +205,10 @@ async def _search_impl(
     kev: bool | None,
     min_epss: float | None,
     min_cvss: float | None,
+    attack_vector: str | None,
+    privileges_required: str | None,
+    user_interaction: str | None,
+    scope: str | None,
     include_chain: bool,
     limit: int,
     offset: int,
@@ -204,6 +232,10 @@ async def _search_impl(
         kev=kev,
         min_epss=min_epss,
         min_cvss=min_cvss,
+        attack_vector=attack_vector,
+        privileges_required=privileges_required,
+        user_interaction=user_interaction,
+        scope=scope,
         offset=offset,
     )
 
@@ -215,6 +247,24 @@ async def _search_impl(
                 f"Invalid severity: {severity!r}. Valid values: {', '.join(SEVERITY_ORDER)}",
                 filters_applied,
             )
+
+    vector_filters: dict[str, str] = {}
+    for name, value in (
+        ("attack_vector", attack_vector),
+        ("privileges_required", privileges_required),
+        ("user_interaction", user_interaction),
+        ("scope", scope),
+    ):
+        if value is None:
+            continue
+        normalized = value.strip().upper()
+        allowed = CVSS_FILTER_VALUES[name]
+        if normalized not in allowed:
+            return _error(
+                f"Invalid {name}: {value!r}. Valid values: {', '.join(sorted(allowed))}.",
+                filters_applied,
+            )
+        vector_filters[name] = normalized
 
     month_id: str | None = None
     if month is not None:
@@ -253,13 +303,20 @@ async def _search_impl(
         kev=kev,
         min_epss=min_epss,
         min_cvss=min_cvss,
+        vector_filters=vector_filters,
     )
     matched = sort_vulnerabilities(matched)
 
+    # Surface the parsed CVSS components in summaries when the caller filtered
+    # on them, so it is clear why each result matched.
+    include_cvss = bool(vector_filters)
     response = {
         **_release_header(release),
         "total_found": len(matched),
-        "vulnerabilities": [v.to_summary_dict() for v in matched[offset : offset + limit]],
+        "vulnerabilities": [
+            v.to_summary_dict(include_cvss=include_cvss)
+            for v in matched[offset : offset + limit]
+        ],
         "filters_applied": filters_applied,
     }
     if include_stats:
@@ -516,9 +573,11 @@ def _filter_vulnerabilities(
     kev: bool | None,
     min_epss: float | None,
     min_cvss: float | None,
+    vector_filters: dict[str, str] | None = None,
 ) -> list[Vulnerability]:
     query_lower = query.lower() if query else None
     product_lower = product.lower() if product else None
+    vector_filters = vector_filters or {}
 
     matched = []
     for v in vulnerabilities:
@@ -543,6 +602,12 @@ def _filter_vulnerabilities(
             continue
         if min_cvss is not None and (v.max_cvss is None or v.max_cvss < min_cvss):
             continue
+        if vector_filters:
+            # Entries without a parseable CVSS vector cannot match a vector filter.
+            if v.cvss is None or any(
+                getattr(v.cvss, field) != value for field, value in vector_filters.items()
+            ):
+                continue
         matched.append(v)
     return matched
 

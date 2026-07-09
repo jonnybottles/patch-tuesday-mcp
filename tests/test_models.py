@@ -184,3 +184,64 @@ def test_parse_exploit_status():
 
 def test_strip_html():
     assert strip_html("<p>Hello&nbsp;<b>world</b></p>\n") == "Hello world"
+
+
+def test_cvss_vector_parsed_onto_vulnerability(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
+    assert vuln.cvss is not None
+    assert vuln.cvss.attack_vector == "L"
+    assert vuln.cvss.privileges_required == "L"
+    assert vuln.cvss.user_interaction == "N"
+    # Raw vector is preserved alongside the parsed components.
+    assert vuln.cvss_vector.startswith("CVSS:3.1/")
+
+
+def test_detail_dict_includes_parsed_cvss(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-47644")
+    detail = vuln.to_detail_dict()
+    assert detail["cvss"]["attack_vector"] == "N"
+    assert detail["cvss"]["user_interaction"] == "R"
+    assert detail["cvss_vector"]  # raw string still present
+
+
+def test_summary_omits_cvss_by_default_but_opts_in(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
+    assert "cvss" not in vuln.to_summary_dict()
+    opted_in = vuln.to_summary_dict(include_cvss=True)
+    assert opted_in["cvss"]["attack_vector"] == "L"
+
+
+def test_malformed_cvss_vector_does_not_break_model():
+    vuln = Vulnerability(cve="CVE-2026-1", cvss_vector="garbage", cvss=None)
+    assert vuln.cvss is None
+    detail = vuln.to_detail_dict()
+    assert "cvss" not in detail  # nothing parsed
+    assert detail["cvss_vector"] == "garbage"  # raw preserved
+
+
+def test_references_generated_without_kev():
+    vuln = Vulnerability(cve="CVE-2026-41108")
+    refs = vuln.references()
+    assert refs["msrc"].endswith("CVE-2026-41108")
+    assert refs["nvd"] == "https://nvd.nist.gov/vuln/detail/CVE-2026-41108"
+    assert "cve=CVE-2026-41108" in refs["epss"]
+    assert "kev" not in refs
+
+
+def test_references_include_kev_when_present():
+    vuln = Vulnerability(cve="CVE-2026-99999", kev={"due_date": "2026-07-06"})
+    refs = vuln.references()
+    assert "cisa.gov" in refs["kev"]
+
+
+def test_detail_dict_includes_references(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
+    detail = vuln.to_detail_dict()
+    assert "references" in detail
+    assert detail["references"]["nvd"].endswith("CVE-2026-41108")
+
+
+def test_summary_omits_references_by_default_but_opts_in(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
+    assert "references" not in vuln.to_summary_dict()
+    assert "references" in vuln.to_summary_dict(include_references=True)

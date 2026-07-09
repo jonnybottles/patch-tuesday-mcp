@@ -228,6 +228,53 @@ async def test_min_cvss_filter():
     assert all(v["max_cvss"] >= 7.0 for v in result["vulnerabilities"])
 
 
+async def test_attack_vector_filter_network_only():
+    result = await msrc_search(attack_vector="n")  # case-insensitive
+    assert result["total_found"] == 1
+    vuln = result["vulnerabilities"][0]
+    assert vuln["cve"] == "CVE-2026-47644"
+    # Parsed CVSS is surfaced in the summary when a vector filter is applied.
+    assert vuln["cvss"]["attack_vector"] == "N"
+    assert result["filters_applied"]["attack_vector"] == "n"
+
+
+async def test_attack_vector_and_privileges_required_combined():
+    result = await msrc_search(attack_vector="N", privileges_required="N")
+    assert result["total_found"] == 1
+    assert result["vulnerabilities"][0]["cve"] == "CVE-2026-47644"
+
+
+async def test_vector_filters_can_exclude_all():
+    # CVE-2026-47644 is AV:N but UI:R, so AV:N + UI:N matches nothing.
+    result = await msrc_search(attack_vector="N", user_interaction="N")
+    assert result["total_found"] == 0
+    assert "error" not in result
+
+
+async def test_scope_filter_matches_all_fixture_entries():
+    result = await msrc_search(scope="U", limit=0, include_stats=True)
+    assert result["stats"]["total"] == 6  # every fixture CVE is S:U
+
+
+async def test_invalid_vector_filter_value_rejected():
+    result = await msrc_search(attack_vector="X")
+    assert "Invalid attack_vector" in result["error"]
+    assert result["error_kind"] == "invalid_input"
+
+
+async def test_cve_detail_includes_cvss_and_references():
+    result = await msrc_search(cve="CVE-2026-41108")
+    detail = result["vulnerabilities"][0]
+    assert detail["cvss"]["attack_vector"] == "L"
+    assert detail["references"]["nvd"].endswith("CVE-2026-41108")
+    assert "epss" in detail["references"]
+
+
+async def test_no_vector_filter_keeps_summary_lean():
+    result = await msrc_search()
+    assert all("cvss" not in v for v in result["vulnerabilities"])
+
+
 async def test_month_normalization_and_invalid():
     result = await msrc_search(month="2026-06")
     assert result["month"] == "2026-Jun"
