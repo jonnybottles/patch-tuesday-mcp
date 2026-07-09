@@ -258,6 +258,18 @@ async def test_full_month_cache_is_bounded(monkeypatch):
     )
 
 
+async def test_recent_month_ttl_expiry_refetches(monkeypatch, mock_api):
+    """A cached *recent* month is re-fetched once its TTL elapses."""
+    now = [10_000.0]
+    monkeypatch.setattr(msrc_api.time, "monotonic", lambda: now[0])
+    await fetch_month("2026-Jun")  # newest month in the index -> has a TTL
+    await fetch_month("2026-Jun")  # within TTL: served from cache
+    now[0] += msrc_api.RECENT_MONTH_TTL_SECONDS + 1
+    await fetch_month("2026-Jun")
+    doc_calls = [c for c in mock_api if c.endswith("/cvrf/2026-Jun")]
+    assert len(doc_calls) == 2, "expired recent month must be re-fetched"
+
+
 async def test_month_fetch_telemetry_includes_cache_hit(monkeypatch, mock_api):
     """Cache hit-rate must be observable: fetch events carry a cache_hit flag."""
     events = []

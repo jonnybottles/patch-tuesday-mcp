@@ -850,6 +850,27 @@ async def test_list_months_returns_release_index():
     assert months[0]["title"] == "June 2026 Security Updates"
 
 
+async def test_trend_partial_month_failure_reports_upstream(monkeypatch):
+    """One failing month inside the trend gather surfaces as an upstream error."""
+
+    with open(FIXTURE, encoding="utf-8") as f:
+        cvrf_doc = json.load(f)
+
+    async def fake_get_json(url, timeout=60.0):
+        if url.endswith("/updates"):
+            return INDEX_RESPONSE
+        if url.endswith("/cvrf/2026-Jun"):
+            return cvrf_doc
+        raise MsrcApiError("MSRC API returned HTTP 503")
+
+    monkeypatch.setattr(msrc_api, "_get_json", fake_get_json)
+    clear_cache()
+
+    result = await msrc_search(months_back=2)
+    assert result["error_kind"] == "upstream"
+    assert "503" in result["error"]
+
+
 async def test_unexpected_exception_returns_internal_error(monkeypatch):
     """Non-MsrcApiError exceptions must become a structured internal error,
     not a raw exception leaking internals to the MCP client."""
