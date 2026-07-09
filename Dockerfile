@@ -1,6 +1,6 @@
 # Builder: install dependencies from the committed lockfile (reproducible),
 # then hand only the finished virtualenv to the runtime stage.
-FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf AS builder
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1 AS builder
 
 RUN pip install --no-cache-dir uv==0.9.18
 
@@ -12,7 +12,7 @@ COPY src ./src
 RUN uv sync --locked --no-dev --extra telemetry --no-editable
 
 # Runtime: same digest-pinned base, no build tooling, non-root.
-FROM python:3.12-slim@sha256:423ed6ab25b1921a477529254bfeeabf5855151dc2c3141699a1bfc852199fbf
+FROM python:3.14-slim@sha256:b877e50bd90de10af8d82c57a022fc2e0dc731c5320d762a27986facfc3355c1
 
 ENV PYTHONUNBUFFERED=1
 
