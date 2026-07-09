@@ -110,11 +110,17 @@ async def fetch_kev(force_refresh: bool = False) -> dict[str, dict]:
         cve_id = entry.get("cveID")
         if not cve_id:
             continue
-        catalog[cve_id] = {
+        fields = {
             "date_added": entry.get("dateAdded"),
             "due_date": entry.get("dueDate"),
             "ransomware_use": entry.get("knownRansomwareCampaignUse"),
+            # Extra catalog fields, surfaced only via include_kev_details
+            "required_action": entry.get("requiredAction"),
+            "vendor_project": entry.get("vendorProject"),
+            "product": entry.get("product"),
+            "vulnerability_name": entry.get("vulnerabilityName"),
         }
+        catalog[cve_id] = {k: v for k, v in fields.items() if v is not None}
 
     _kev_cache[:] = [now, catalog]
     return catalog

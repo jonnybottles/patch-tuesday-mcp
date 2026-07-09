@@ -58,6 +58,31 @@ def test_synthetic_exploited_flag(release):
     assert vuln.exploitability.get("Exploited") == "Yes"
 
 
+def test_kb_restart_required_parsed(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
+    kb = next(k for k in vuln.kb_articles if k.kb == "5094123")
+    assert kb.restart_required == "Yes"
+    # Not in the default dict (compatibility contract); opt-in only
+    assert "restart_required" not in kb.to_dict()
+    assert kb.to_dict(include_restart=True)["restart_required"] == "Yes"
+
+
+def test_cvss_temporal_score_parsed(release):
+    vuln = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-41108")
+    assert vuln.cvss_temporal_score == 6.1
+    # The default detail cvss block must not change shape
+    assert "temporal_score" not in vuln.to_detail_dict()["cvss"]
+    detail = vuln.to_detail_dict(include_temporal=True)
+    assert detail["cvss"]["temporal_score"] == 6.1
+
+
+def test_exploitation_assessment_property(release):
+    likely = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-50656")
+    assert likely.exploitation_assessment == "Exploitation More Likely"
+    linux = next(v for v in release.vulnerabilities if v.cve == "CVE-2026-46245")
+    assert linux.exploitation_assessment == ""
+
+
 def test_publicly_disclosed_flag(release):
     disclosed = [v for v in release.vulnerabilities if v.publicly_disclosed]
     assert disclosed, "fixture includes a publicly disclosed CVE"

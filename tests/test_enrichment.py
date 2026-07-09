@@ -101,6 +101,7 @@ async def test_kev_caching_and_parse(mock_api):
         "date_added": "2026-06-15",
         "due_date": "2026-07-06",
         "ransomware_use": "Known",
+        "vendor_project": "Microsoft",
     }
     assert set(catalog) == {"CVE-2026-99999", "CVE-2026-12345"}
 

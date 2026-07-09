@@ -724,6 +724,132 @@ async def test_kb_scan_upstream_failure_reported_as_upstream(monkeypatch):
     assert "could not be fetched" in result["error"]
 
 
+# --- Wave 3 opt-in parameters ---
+
+
+async def test_default_summary_shape_unchanged():
+    """Compatibility contract: none of the new opt-in fields leak by default."""
+    result = await msrc_search()
+    for row in result["vulnerabilities"]:
+        assert "references" not in row
+        assert "exploitation_assessment" not in row
+        assert "cwe" not in row
+        assert all(isinstance(kb, str) for kb in row.get("kb_articles", []))
+        assert row.get("kev") in (None, True)
+
+
+async def test_include_references_in_list_results():
+    result = await msrc_search(include_references=True)
+    assert result["total_found"] == 6
+    for row in result["vulnerabilities"]:
+        assert row["references"]["msrc"].endswith(row["cve"])
+        assert "nvd" in row["references"]
+
+
+async def test_exploitation_likely_filter_and_field():
+    result = await msrc_search(exploitation_likely=True)
+    assert [v["cve"] for v in result["vulnerabilities"]] == ["CVE-2026-50656"]
+    assert (
+        result["vulnerabilities"][0]["exploitation_assessment"] == "Exploitation More Likely"
+    )
+    # False matches everything not assessed as likely (fail-open on missing)
+    result = await msrc_search(exploitation_likely=False)
+    assert result["total_found"] == 5
+    assert result["filters_applied"]["exploitation_likely"] is False
+
+
+async def test_ransomware_filter(monkeypatch):
+    _set_enrichment(
+        monkeypatch,
+        kev={
+            "CVE-2026-99999": KEV_FIELDS,
+            "CVE-2026-41108": {**KEV_FIELDS, "knownRansomwareCampaignUse": "Unknown"},
+        },
+    )
+    result = await msrc_search(ransomware=True)
+    assert [v["cve"] for v in result["vulnerabilities"]] == ["CVE-2026-99999"]
+    result = await msrc_search(ransomware=False)
+    assert "CVE-2026-99999" not in [v["cve"] for v in result["vulnerabilities"]]
+    assert result["total_found"] == 5
+
+
+async def test_include_kev_details_in_summaries(monkeypatch):
+    _set_enrichment(
+        monkeypatch,
+        kev={"CVE-2026-99999": {**KEV_FIELDS, "requiredAction": "Apply updates."}},
+    )
+    result = await msrc_search(kev=True, include_kev_details=True)
+    row = result["vulnerabilities"][0]
+    assert row["kev"]["due_date"] == "2026-07-06"
+    assert row["kev"]["ransomware_use"] == "Known"
+    assert row["kev"]["required_action"] == "Apply updates."
+    # Default stays a boolean presence flag
+    result = await msrc_search(kev=True)
+    assert result["vulnerabilities"][0]["kev"] is True
+
+
+async def test_kev_detail_dict_extra_fields_are_opt_in(monkeypatch):
+    _set_enrichment(
+        monkeypatch,
+        kev={"CVE-2026-41108": {**KEV_FIELDS, "requiredAction": "Apply updates."}},
+    )
+    result = await msrc_search(cve="CVE-2026-41108")
+    assert "required_action" not in result["vulnerabilities"][0]["kev"]
+    result = await msrc_search(cve="CVE-2026-41108", include_kev_details=True)
+    assert result["vulnerabilities"][0]["kev"]["required_action"] == "Apply updates."
+
+
+async def test_include_kb_details_in_kb_lookup():
+    result = await msrc_search(kb="5094123", include_kb_details=True)
+    kb_entries = result["vulnerabilities"][0]["kb_articles"]
+    assert all(isinstance(k, dict) for k in kb_entries)
+    entry = next(k for k in kb_entries if k["kb"] == "5094123")
+    assert entry["fixed_build"] == "10.0.17763.8880"
+    assert entry["restart_required"] == "Yes"
+    assert entry["url"]
+    # Default KB lookup keeps bare KB numbers
+    result = await msrc_search(kb="5094123")
+    assert all(isinstance(k, str) for k in result["vulnerabilities"][0]["kb_articles"])
+
+
+async def test_cve_detail_restart_required_is_opt_in():
+    result = await msrc_search(cve="CVE-2026-41108")
+    assert all("restart_required" not in k for k in result["vulnerabilities"][0]["kb_articles"])
+    result = await msrc_search(cve="CVE-2026-41108", include_kb_details=True)
+    entry = next(
+        k for k in result["vulnerabilities"][0]["kb_articles"] if k["kb"] == "5094123"
+    )
+    assert entry["restart_required"] == "Yes"
+
+
+async def test_cwe_filter_and_field():
+    result = await msrc_search(cwe="CWE-59")
+    assert [v["cve"] for v in result["vulnerabilities"]] == ["CVE-2026-50656"]
+    assert result["vulnerabilities"][0]["cwe"] == [
+        "CWE-59: Improper Link Resolution Before File Access ('Link Following')"
+    ]
+    # Free-text match on the weakness name also works
+    result = await msrc_search(cwe="buffer overflow")
+    cves = {v["cve"] for v in result["vulnerabilities"]}
+    assert cves == {"CVE-2026-41108", "CVE-2026-99999"}
+
+
+async def test_include_temporal_in_cve_detail():
+    result = await msrc_search(cve="CVE-2026-41108")
+    assert "temporal_score" not in result["vulnerabilities"][0]["cvss"]
+    result = await msrc_search(cve="CVE-2026-41108", include_temporal=True)
+    assert result["vulnerabilities"][0]["cvss"]["temporal_score"] == 6.1
+
+
+async def test_list_months_returns_release_index():
+    result = await msrc_search(list_months=True)
+    assert result["total_found"] == 2
+    months = result["available_months"]
+    assert [m["id"] for m in months] == ["2026-Jun", "2026-May"]
+    assert months[0]["current_release_date"] == "2026-07-07T07:00:00Z"
+    assert months[0]["title"] == "June 2026 Security Updates"
+
+
 async def test_unexpected_exception_returns_internal_error(monkeypatch):
     """Non-MsrcApiError exceptions must become a structured internal error,
     not a raw exception leaking internals to the MCP client."""
