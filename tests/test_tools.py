@@ -156,6 +156,23 @@ async def test_kb_invalid():
     assert result["error_kind"] == "invalid_input"
 
 
+async def test_summary_kb_articles_keep_non_kb_labels():
+    # MSRC labels some vendor-fix remediations "Release Notes" instead of a KB
+    # id; default output must carry them verbatim (compatibility contract).
+    result = await msrc_search()
+    vuln = next(v for v in result["vulnerabilities"] if v["cve"] == "CVE-2026-45472")
+    assert "Release Notes" in vuln["kb_articles"]
+    assert any(kb.isdigit() for kb in vuln["kb_articles"])
+
+
+async def test_kb_non_numeric_label_error_points_at_kb_articles():
+    result = await msrc_search(kb="Release Notes")
+    assert result["error_kind"] == "invalid_input"
+    assert "Invalid KB number" in result["error"]
+    assert "vendor-fix" in result["error"]
+    assert "kb_articles" in result["error"]
+
+
 async def test_kb_with_month():
     detail = await msrc_search(cve="CVE-2026-41108")
     kb = detail["vulnerabilities"][0]["kb_articles"][0]["kb"]

@@ -145,7 +145,9 @@ async def msrc_search(
         kb: Optional KB article number (e.g. "5094123" or "KB5094123"). Fast
             path: returns the CVEs fixed by that KB, scanning the most recent
             months (up to 6), or only the given month when month= is also set.
-            Honors limit/offset; other filters are ignored.
+            Honors limit/offset; other filters are ignored. Accepts numeric KB
+            ids only; kb_articles in results may also contain non-KB vendor-fix
+            labels such as "Release Notes", which cannot be looked up here.
         month: Optional monthly release to search, formatted "2026-Apr" or
             "2026-04". Defaults to the most recent release whose Patch
             Tuesday (second Tuesday of the month) has already occurred; pass
@@ -949,7 +951,9 @@ async def _lookup_kb(
         filters_applied["force_refresh"] = True
     if not kb_number.isdigit():
         return _error(
-            f"Invalid KB number: {kb!r}. Expected e.g. '5094123' or 'KB5094123'.",
+            f"Invalid KB number: {kb!r}. Expected a numeric KB id like '5094123' or "
+            "'KB5094123'. kb_articles entries such as 'Release Notes' are vendor-fix "
+            "labels, not KB ids -- pick a numeric entry from kb_articles instead.",
             filters_applied,
         )
 
