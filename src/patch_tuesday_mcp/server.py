@@ -207,8 +207,11 @@ def build_http_app(*, log_settings: bool = False):
         )
         print(f"CORS origins: {cors_display}")
         if trust_xff:
+            # Summarize rather than echo the entries: raw values in startup
+            # logs trip CodeQL's clear-text-logging heuristic (issue #10).
             proxy_display = (
-                f"via proxies {', '.join(sorted(trusted_proxies))}"
+                f"via {len(trusted_proxies)} pinned proxy "
+                f"{'entry' if len(trusted_proxies) == 1 else 'entries'} (MCP_TRUSTED_PROXIES)"
                 if trusted_proxies
                 else "rightmost hop (private/loopback peers only; set "
                 "MCP_TRUSTED_PROXIES to pin your ingress)"

@@ -128,7 +128,7 @@ async def test_lifespan_shutdown_closes_shared_client(monkeypatch):
     assert {"type": "lifespan.shutdown.complete"} in sent
 
 
-def _build_stack(monkeypatch, **env):
+def _build_stack(monkeypatch, *, log_settings=False, **env):
     """Build the production middleware stack with a clean, overridable env."""
     for name in (
         "RATE_LIMIT_RPM",
@@ -141,7 +141,7 @@ def _build_stack(monkeypatch, **env):
         monkeypatch.delenv(name, raising=False)
     for name, value in env.items():
         monkeypatch.setenv(name, value)
-    return server.build_http_app()
+    return server.build_http_app(log_settings=log_settings)
 
 
 def _stack_client(app):
@@ -203,6 +203,16 @@ async def test_stack_exposes_mcp_session_id(monkeypatch):
         response = await client.get("/health", headers={"Origin": "https://client.example"})
     assert response.status_code == 200
     assert "mcp-session-id" in response.headers.get("access-control-expose-headers", "").lower()
+
+
+def test_startup_log_summarizes_trusted_proxies(monkeypatch, capsys):
+    # The startup log must state how many proxies are pinned without echoing
+    # the values — raw entries in logs re-trip CodeQL's sensitive-data check.
+    _build_stack(monkeypatch, log_settings=True, MCP_TRUSTED_PROXIES="10.1.2.3,10.4.5.6")
+    out = capsys.readouterr().out
+    assert "Trusting X-Forwarded-For: via 2 pinned proxy entries (MCP_TRUSTED_PROXIES)" in out
+    assert "10.1.2.3" not in out
+    assert "10.4.5.6" not in out
 
 
 async def test_triage_prompt_is_registered():
