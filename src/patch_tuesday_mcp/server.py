@@ -94,7 +94,12 @@ mcp = FastMCP(
         "retrieve vulnerabilities and their fixes. Look up a specific CVE with "
         "cve='CVE-...' (full detail, works across all months), find what a KB "
         "fixes with kb='5094123', or filter the latest month by product, "
-        "severity, exploited=True, or min_cvss. Results are enriched with "
+        "severity, exploited=True, or min_cvss. Scope any search to a product "
+        "watchlist with product_profile='identity-core' (built-ins: "
+        "identity-core, endpoint, server-infrastructure; extend via a JSON "
+        "file at MSRC_PROFILES_PATH) or ad-hoc products=[...] / "
+        "product_families=[...] lists — matching is local and profile "
+        "contents never leave the host. Results are enriched with "
         "EPSS exploitation probabilities and CISA KEV catalog status: filter "
         "with kev=True (confirmed exploited, federal due dates), "
         "ransomware=True (known ransomware campaign use), min_epss=0.5 "
@@ -108,7 +113,8 @@ mcp = FastMCP(
         "KEV). Use list_months=True to discover available monthly releases. "
         "When no month is given, results default to the most recent release "
         "whose Patch Tuesday has occurred; the upcoming month's pre-release "
-        "document (early/out-of-band entries only) is available via month=."
+        "document (early/out-of-band entries only) is available via month=. "
+        "A guided analyst workflow is available as the monthly_triage prompt."
     ),
 )
 

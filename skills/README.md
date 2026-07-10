@@ -1,6 +1,6 @@
 # patch-tuesday-mcp skills
 
-Portable [agent skills](https://code.visualstudio.com/) for the Patch Tuesday
+Portable [agent skills](https://agentskills.io/) for the Patch Tuesday
 triage workflow. These are **plain Markdown + YAML front matter** — they carry
 no code and can be deployed **independently of the MCP server**.
 
