@@ -58,6 +58,7 @@ On Windows in this repo use `.venv/Scripts/python -m pytest` etc. — the venv w
 
 - **Hosted endpoint** (public, no auth — owner's explicit choice): `https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp` (+ `/health`, which reports the running version).
 - **Deploy flow**: bump `version` in **both** `pyproject.toml` and `src/patch_tuesday_mcp/__init__.py` → `uv lock` → `docker build -t docker.io/xxbutler21xx/patch-tuesday-mcp:<version> .` → push → `az containerapp update -n patch-tuesday-mcp -g patch-tuesday-rg --image docker.io/xxbutler21xx/patch-tuesday-mcp:<version>`. An unchanged image ref does not roll a new revision; ACA may briefly serve the draining old revision after update.
+- **Post-deploy verification (every deployment, local container AND remote ACA)**: (1) `GET /health` returns the expected version; (2) MCP tool round-trip over `/mcp` — list tools, then a real `msrc_search` call; (3) MCP prompt round-trip — `list_prompts` shows `monthly_triage`, and `get_prompt` renders it both with no args and with `product_profile`/`month` args embedded in the output.
 - **PyPI**: publishing is automated — creating a GitHub release triggers `.github/workflows/publish.yml` (trusted publishing + build-provenance attestation). `workflow_dispatch` publishes to TestPyPI instead.
 - `SECURITY.md` documents the private-disclosure process and hosted-endpoint scope.
 - Pushing directly to `main` on origin is permission-gated for automated sessions.
