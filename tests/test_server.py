@@ -128,6 +128,83 @@ async def test_lifespan_shutdown_closes_shared_client(monkeypatch):
     assert {"type": "lifespan.shutdown.complete"} in sent
 
 
+def _build_stack(monkeypatch, **env):
+    """Build the production middleware stack with a clean, overridable env."""
+    for name in (
+        "RATE_LIMIT_RPM",
+        "MCP_MAX_BODY_BYTES",
+        "MCP_CORS_ORIGINS",
+        "MCP_TRUST_X_FORWARDED_FOR",
+        "MCP_TRUSTED_PROXIES",
+        "APPLICATIONINSIGHTS_CONNECTION_STRING",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    return server.build_http_app()
+
+
+def _stack_client(app):
+    transport = httpx.ASGITransport(app=app)
+    return httpx.AsyncClient(transport=transport, base_url="http://test")
+
+
+async def test_stack_health_is_rate_limit_exempt(monkeypatch):
+    app = _build_stack(monkeypatch, RATE_LIMIT_RPM="2")
+    async with _stack_client(app) as client:
+        responses = [await client.get("/health") for _ in range(5)]
+    assert [r.status_code for r in responses] == [200] * 5
+    assert responses[0].json()["version"] == __version__
+
+
+async def test_stack_rate_limit_429_carries_cors_headers(monkeypatch):
+    # NB: uses a 404 path, not /mcp — ASGITransport runs no lifespan, so the
+    # streamable-HTTP session manager is uninitialized; the rate limiter counts
+    # every non-/health path either way.
+    app = _build_stack(monkeypatch, RATE_LIMIT_RPM="2")
+    async with _stack_client(app) as client:
+        headers = {"Origin": "https://client.example"}
+        statuses = [
+            (await client.get("/missing", headers=headers)).status_code for _ in range(2)
+        ]
+        throttled = await client.get("/missing", headers=headers)
+    assert statuses == [404, 404]
+    assert throttled.status_code == 429
+    assert "retry-after" in throttled.headers
+    # CORS is outermost, so even throttled responses are readable cross-origin.
+    assert throttled.headers.get("access-control-allow-origin") == "*"
+
+
+async def test_stack_body_limit_413(monkeypatch):
+    app = _build_stack(monkeypatch, MCP_MAX_BODY_BYTES="100")
+    async with _stack_client(app) as client:
+        response = await client.post("/missing", content=b"x" * 200)
+    assert response.status_code == 413
+
+
+async def test_stack_cors_preflight(monkeypatch):
+    app = _build_stack(monkeypatch, MCP_CORS_ORIGINS="https://allowed.example")
+    async with _stack_client(app) as client:
+        response = await client.options(
+            "/mcp",
+            headers={
+                "Origin": "https://allowed.example",
+                "Access-Control-Request-Method": "POST",
+            },
+        )
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == "https://allowed.example"
+    assert "POST" in response.headers["access-control-allow-methods"]
+
+
+async def test_stack_exposes_mcp_session_id(monkeypatch):
+    app = _build_stack(monkeypatch)
+    async with _stack_client(app) as client:
+        response = await client.get("/health", headers={"Origin": "https://client.example"})
+    assert response.status_code == 200
+    assert "mcp-session-id" in response.headers.get("access-control-expose-headers", "").lower()
+
+
 async def test_triage_prompt_is_registered():
     async with Client(mcp) as client:
         prompts = await client.list_prompts()

@@ -54,6 +54,39 @@ jobs:
           ignore-unfixed: true
           trivyignores: .trivyignore
 
+      # Endpoint smoke: run the freshly built (and Trivy-scanned) image and
+      # exercise the MCP protocol + middleware over real HTTP. Only
+      # upstream-free tests run here so PR checks never depend on live
+      # MSRC/EPSS/KEV availability; no secrets needed, so fork PRs are
+      # covered too.
+      - name: Run container for endpoint smoke
+        run: docker run -d --name mcp-smoke -p 8000:8000 patch-tuesday-mcp:ci
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+
+      - name: Install package with dev extras
+        run: python -m pip install -e ".[dev]"
+
+      - name: Wait for container health
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://localhost:8000/health > /dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "container did not become healthy" >&2
+          exit 1
+
+      - name: Endpoint smoke (MCP over HTTP, upstream-free)
+        run: >-
+          pytest -q -m "endpoint and not endpoint_upstream"
+          --endpoint-url=http://localhost:8000 --endpoint-burst
+
+      - name: Container logs
+        if: failure()
+        run: docker logs mcp-smoke
+
       - name: Generate SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
