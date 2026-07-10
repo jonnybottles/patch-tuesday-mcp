@@ -336,7 +336,7 @@ HTTP-mode environment variables:
 | `MCP_MAX_BODY_BYTES` | `262144` | Max request body size, returns 413 above it (`0` disables) |
 | `MCP_CORS_ORIGINS` | `*` (all) | Comma-separated allowlist of browser origins. **Set an explicit list for public deployments** (e.g. `https://app.example.com`) |
 | `MCP_TRUST_X_FORWARDED_FOR` | `true` | Whether the `X-Forwarded-For` header may be used to derive the client IP for rate limiting. Even when `true`, the header is only honored if the request arrives from a **private/loopback peer** (an ingress proxy) or a listed trusted proxy — a directly exposed public peer can never forge it. Set to `false` to ignore the header entirely |
-| `MCP_TRUSTED_PROXIES` | unset | Comma-separated proxy IPs. When set, `X-Forwarded-For` is only honored if the request arrives via one of these proxies, and the client is resolved as the right-most hop that is not itself a trusted proxy (unwinds chained proxies) |
+| `MCP_TRUSTED_PROXIES` | unset | Comma-separated proxy IPs. When set, `X-Forwarded-For` is only honored if the request arrives via one of these proxies, and the client is resolved as the right-most hop that is not itself a trusted proxy (unwinds chained proxies). The startup log reports only how many entries are pinned, never the values |
 | `MCP_LIMIT_CONCURRENCY` | `40` | Max concurrent in-flight connections; uvicorn responds 503 beyond it (`0` disables) |
 | `MCP_TIMEOUT_KEEP_ALIVE` | `15` | Seconds before idle keep-alive connections are closed |
 | `MCP_LOG_LEVEL` | `WARNING` | Root log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`); logs go to stderr |
