@@ -153,6 +153,74 @@ async def health(request):
     return JSONResponse({"status": "ok", "server": "patch-tuesday-mcp", "version": __version__})
 
 
+def build_http_app(*, log_settings: bool = False):
+    """Assemble the production HTTP ASGI app from environment configuration.
+
+    Wraps the stateless MCP app in (innermost → outermost): client-cleanup
+    lifespan → body limit → rate limit → CORS. This is the exact stack served
+    in HTTP mode; tests exercise it directly so a wiring change can't slip
+    past the suite. ``log_settings`` prints the resolved configuration
+    (used by ``main()`` at startup).
+    """
+    from starlette.middleware.cors import CORSMiddleware
+
+    rpm = int(os.getenv("RATE_LIMIT_RPM", "60"))
+    max_body = int(os.getenv("MCP_MAX_BODY_BYTES", str(DEFAULT_MAX_BODY_BYTES)))
+    cors_origins = _cors_origins()
+    trust_xff = _env_flag("MCP_TRUST_X_FORWARDED_FOR", True)
+    trusted_proxies = _trusted_proxies()
+
+    telemetry_enabled = telemetry.setup_telemetry()
+
+    # Stateless: every request is self-contained, so replicas behind
+    # ingress without session affinity can serve any request
+    app = _ClientCleanup(mcp.http_app(stateless_http=True))
+    app = BodyLimitMiddleware(
+        app,
+        max_bytes=max_body,
+        on_rejected=telemetry.track_rejected_body if telemetry_enabled else None,
+    )
+    app = RateLimitMiddleware(
+        app,
+        requests_per_minute=rpm,
+        on_request=telemetry.track_request if telemetry_enabled else None,
+        on_throttled=telemetry.track_throttled if telemetry_enabled else None,
+        trust_x_forwarded_for=trust_xff,
+        trusted_proxies=trusted_proxies,
+    )
+    # CORS outermost so preflights and 429/413 responses carry CORS headers
+    app = CORSMiddleware(
+        app,
+        allow_origins=cors_origins,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["Mcp-Session-Id"],
+        max_age=86400,
+    )
+
+    if log_settings:
+        print(f"Rate limit: {rpm} req/min per IP" if rpm > 0 else "Rate limit: disabled")
+        cors_display = (
+            "* (all — restrict for public deploy)"
+            if cors_origins == ["*"]
+            else ", ".join(cors_origins)
+        )
+        print(f"CORS origins: {cors_display}")
+        if trust_xff:
+            proxy_display = (
+                f"via proxies {', '.join(sorted(trusted_proxies))}"
+                if trusted_proxies
+                else "rightmost hop (private/loopback peers only; set "
+                "MCP_TRUSTED_PROXIES to pin your ingress)"
+            )
+            print(f"Trusting X-Forwarded-For: {proxy_display}")
+        else:
+            print("Trusting X-Forwarded-For: no (direct peer IP only)")
+        print(f"Telemetry: {'enabled' if telemetry_enabled else 'disabled'}")
+
+    return app
+
+
 def main():
     """Run the MCP server.
 
@@ -177,64 +245,13 @@ def main():
 
     if transport == "http":
         import uvicorn
-        from starlette.middleware.cors import CORSMiddleware
 
         host = os.getenv("MCP_HOST", "0.0.0.0")
         port = int(os.getenv("MCP_PORT", "8000"))
-        rpm = int(os.getenv("RATE_LIMIT_RPM", "60"))
-        max_body = int(os.getenv("MCP_MAX_BODY_BYTES", str(DEFAULT_MAX_BODY_BYTES)))
-        cors_origins = _cors_origins()
-        trust_xff = _env_flag("MCP_TRUST_X_FORWARDED_FOR", True)
-        trusted_proxies = _trusted_proxies()
-
-        telemetry_enabled = telemetry.setup_telemetry()
-
-        # Stateless: every request is self-contained, so replicas behind
-        # ingress without session affinity can serve any request
-        app = _ClientCleanup(mcp.http_app(stateless_http=True))
-        app = BodyLimitMiddleware(
-            app,
-            max_bytes=max_body,
-            on_rejected=telemetry.track_rejected_body if telemetry_enabled else None,
-        )
-        app = RateLimitMiddleware(
-            app,
-            requests_per_minute=rpm,
-            on_request=telemetry.track_request if telemetry_enabled else None,
-            on_throttled=telemetry.track_throttled if telemetry_enabled else None,
-            trust_x_forwarded_for=trust_xff,
-            trusted_proxies=trusted_proxies,
-        )
-        # CORS outermost so preflights and 429/413 responses carry CORS headers
-        app = CORSMiddleware(
-            app,
-            allow_origins=cors_origins,
-            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-            allow_headers=["*"],
-            expose_headers=["Mcp-Session-Id"],
-            max_age=86400,
-        )
 
         print(f"Starting Patch Tuesday MCP server on {host}:{port}")
         print(f"MCP endpoint: http://{host}:{port}/mcp")
-        print(f"Rate limit: {rpm} req/min per IP" if rpm > 0 else "Rate limit: disabled")
-        cors_display = (
-            "* (all — restrict for public deploy)"
-            if cors_origins == ["*"]
-            else ", ".join(cors_origins)
-        )
-        print(f"CORS origins: {cors_display}")
-        if trust_xff:
-            proxy_display = (
-                f"via proxies {', '.join(sorted(trusted_proxies))}"
-                if trusted_proxies
-                else "rightmost hop (private/loopback peers only; set "
-                "MCP_TRUSTED_PROXIES to pin your ingress)"
-            )
-            print(f"Trusting X-Forwarded-For: {proxy_display}")
-        else:
-            print("Trusting X-Forwarded-For: no (direct peer IP only)")
-        print(f"Telemetry: {'enabled' if telemetry_enabled else 'disabled'}")
+        app = build_http_app(log_settings=True)
         uvicorn.run(app, host=host, port=port, log_level="warning", **_uvicorn_limits())
     else:
         # stdio transport (default for MCP client auto-start)

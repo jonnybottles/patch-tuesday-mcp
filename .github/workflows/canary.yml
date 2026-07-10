@@ -1,0 +1,68 @@
+name: Canary
+
+# Daily probe of the hosted ACA endpoint: /health version match, MCP tool and
+# prompt round-trips, and real upstream searches through the deployed server.
+# Runs from main only — it tests what is deployed, never PR code. On failure
+# it files (or comments on) a `canary`-labeled issue instead of only leaving
+# a red run nobody watches.
+
+on:
+  schedule:
+    - cron: "17 13 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  canary:
+    name: Live endpoint canary (ACA)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.14"
+
+      - name: Install package with dev extras
+        run: python -m pip install -e ".[dev]"
+
+      # No burst test against the hosted endpoint: the per-IP rate-limit
+      # bucket is shared with real users.
+      - name: Endpoint suite against the hosted ACA endpoint
+        run: >-
+          pytest -q -m "endpoint and not endpoint_burst"
+          --endpoint-url=https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io
+
+      - name: File or update canary issue
+        if: failure()
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const body = `Scheduled canary against the hosted ACA endpoint failed: ${runUrl}`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              labels: "canary",
+            });
+            if (issues.length > 0) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: issues[0].number,
+                body,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title: "Canary: live ACA endpoint checks failing",
+                body,
+                labels: ["canary"],
+              });
+            }
