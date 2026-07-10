@@ -396,7 +396,7 @@ pytest --cov=patch_tuesday_mcp   # coverage (CI enforces >= 90%)
 ruff check src/ tests/
 ```
 
-CI (GitHub Actions) runs the offline suite on Python 3.11/3.12 with a coverage
+CI (GitHub Actions) runs the offline suite on Python 3.11/3.12/3.14 with a coverage
 gate, lints with ruff, builds the container, scans it with Trivy, and produces
 an SPDX SBOM on every push/PR. Release builds attest provenance for the
 published wheel/sdist. Dependencies are locked in `uv.lock` (used by the Docker

@@ -47,12 +47,12 @@ On Windows in this repo use `.venv/Scripts/python -m pytest` etc. — the venv w
 
 ## CI & Supply Chain
 
-- `.github/workflows/ci.yml` — pytest (3.11/3.12) + ruff + `--cov-fail-under=90`, then a container build with a Trivy CRITICAL/HIGH scan and an SPDX SBOM artifact, on every push/PR.
+- `.github/workflows/ci.yml` — pytest (3.11/3.12/3.14) + ruff + `--cov-fail-under=90`, then a container build with a Trivy CRITICAL/HIGH scan and an SPDX SBOM artifact, on every push/PR.
 - `.github/workflows/codeql.yml` — CodeQL (python) on push/PR + weekly.
 - `.github/dependabot.yml` — weekly pip/actions/docker update PRs.
 - All GitHub Actions are pinned to commit SHAs (Dependabot keeps them fresh); keep new workflow steps SHA-pinned too.
 - `uv.lock` is committed and embeds the project version — **run `uv lock` after any dependency or version change**, or the Docker build (`uv sync --locked`) fails.
-- The Dockerfile is multi-stage on a digest-pinned `python:3.12-slim`, runs non-root, and has a HEALTHCHECK against `/health`.
+- The Dockerfile is multi-stage on a digest-pinned `python:3.14-slim`, runs non-root, and has a HEALTHCHECK against `/health`.
 
 ## Release & Deployment
 
