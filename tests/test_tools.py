@@ -1215,3 +1215,101 @@ async def test_no_range_params_keeps_single_month(monkeypatch):
     assert "range" not in result
     assert "trend" not in result
 
+
+
+# --- Product profiles / watchlist filtering ---
+
+
+async def test_products_list_filter():
+    result = await msrc_search(products=["windows 10"], limit=50)
+    assert result["total_found"] == 2
+    assert {v["cve"] for v in result["vulnerabilities"]} == {
+        "CVE-2026-41108",
+        "CVE-2026-99999",
+    }
+
+
+async def test_product_families_list_filter():
+    result = await msrc_search(product_families=["Browser"], limit=50)
+    assert result["total_found"] == 1
+    assert result["vulnerabilities"][0]["cve"] == "CVE-2026-47644"
+
+
+async def test_products_and_families_union():
+    # Office matches by product name; Browser matches by family -> union of both
+    result = await msrc_search(
+        products=["Microsoft Office"], product_families=["Browser"], limit=50
+    )
+    assert {v["cve"] for v in result["vulnerabilities"]} == {
+        "CVE-2026-45472",
+        "CVE-2026-47644",
+    }
+
+
+async def test_builtin_profile_endpoint():
+    # endpoint profile: Windows (2 CVEs) + Microsoft Edge / Browser family (1 CVE)
+    result = await msrc_search(product_profile="endpoint", limit=50)
+    assert {v["cve"] for v in result["vulnerabilities"]} == {
+        "CVE-2026-41108",
+        "CVE-2026-99999",
+        "CVE-2026-47644",
+    }
+
+
+async def test_profile_from_file_union_of_family_and_product(monkeypatch, tmp_path):
+    # A profile with families + products keeps vulns matching either.
+    # Windows family -> 2 CVEs, Office product -> 1 CVE.
+    path = tmp_path / "profiles.json"
+    path.write_text(
+        json.dumps({"triage": {"families": ["Windows"], "products": ["Microsoft Office"]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("MSRC_PROFILES_PATH", str(path))
+    result = await msrc_search(product_profile="triage", limit=50)
+    assert {v["cve"] for v in result["vulnerabilities"]} == {
+        "CVE-2026-41108",
+        "CVE-2026-99999",
+        "CVE-2026-45472",
+    }
+
+
+async def test_profile_combines_with_other_filters():
+    # Profile ANDs with severity: only Critical Windows/Edge vulns survive.
+    result = await msrc_search(product_profile="endpoint", severity="Critical", limit=50)
+    for v in result["vulnerabilities"]:
+        assert v["severity"] == "Critical"
+
+
+async def test_unknown_profile_returns_invalid_input():
+    result = await msrc_search(product_profile="does-not-exist")
+    assert result["error_kind"] == "invalid_input"
+    assert "does-not-exist" in result["error"]
+    # Must not fall back to a broad, unfiltered result set
+    assert result["total_found"] == 0
+    assert result["vulnerabilities"] == []
+
+
+async def test_invalid_profile_file_returns_error(monkeypatch, tmp_path):
+    monkeypatch.setenv("MSRC_PROFILES_PATH", str(tmp_path / "missing.json"))
+    result = await msrc_search(product_profile="identity-core")
+    assert result["error_kind"] == "invalid_input"
+    assert result["total_found"] == 0
+    assert result["vulnerabilities"] == []
+
+
+async def test_no_profile_leaves_behavior_unchanged():
+    baseline = await msrc_search(limit=50)
+    assert baseline["total_found"] == 6
+
+
+async def test_profile_contents_not_echoed_in_filters(monkeypatch, tmp_path):
+    # Privacy: only the profile name is surfaced, never its expanded contents.
+    path = tmp_path / "profiles.json"
+    path.write_text(
+        json.dumps({"secretwatch": {"products": ["Contoso Internal App"]}}), encoding="utf-8"
+    )
+    monkeypatch.setenv("MSRC_PROFILES_PATH", str(path))
+    result = await msrc_search(product_profile="secretwatch", limit=50)
+    filters = result["filters_applied"]
+    assert filters.get("product_profile") == "secretwatch"
+    assert "Contoso Internal App" not in json.dumps(filters)

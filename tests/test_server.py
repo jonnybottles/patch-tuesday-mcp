@@ -126,3 +126,36 @@ async def test_lifespan_shutdown_closes_shared_client(monkeypatch):
     await wrapped({"type": "lifespan"}, receive, send)
     assert closed == [True], "shared httpx client must be closed on shutdown"
     assert {"type": "lifespan.shutdown.complete"} in sent
+
+
+async def test_triage_prompt_is_registered():
+    async with Client(mcp) as client:
+        prompts = await client.list_prompts()
+        prompt = next((p for p in prompts if p.name == "monthly_triage"), None)
+        assert prompt is not None
+        assert prompt.title == "Monthly Patch Tuesday Triage"
+        arg_names = {a.name for a in (prompt.arguments or [])}
+        assert {"product_profile", "month"} <= arg_names
+
+
+async def test_triage_prompt_renders_workflow_with_scope():
+    async with Client(mcp) as client:
+        result = await client.get_prompt(
+            "monthly_triage", {"product_profile": "identity-core"}
+        )
+        text = result.messages[0].content.text
+        # Single-tool workflow with the profile threaded into the example calls.
+        assert "msrc_search" in text
+        assert 'product_profile="identity-core"' in text
+        # Covers the required analyst workflow sections.
+        for needle in ("Publicly disclosed", "KEV", "exploited", "Endpoint"):
+            assert needle in text
+
+
+async def test_triage_prompt_defaults_to_whole_release():
+    async with Client(mcp) as client:
+        result = await client.get_prompt("monthly_triage", {})
+        text = result.messages[0].content.text
+        assert "whole release" in text
+        # No dangling profile argument when none is supplied.
+        assert "product_profile=" not in text

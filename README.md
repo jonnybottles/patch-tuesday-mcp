@@ -138,6 +138,33 @@ pip install --upgrade patch-tuesday-mcp
 
 - **msrc_search** – Search and filter Microsoft security updates by keyword, CVE, KB number, month, product, severity, CVSS score, exploited-in-the-wild status, or public disclosure. When no month is given, results default to the most recent release whose Patch Tuesday has already occurred — the upcoming month's pre-release document (early Chromium/out-of-band entries only) is skipped by default and available explicitly via `month=`. Results are enriched with **EPSS scores** (FIRST.org 30-day exploitation probability, `min_epss=0.5` filter) and **CISA KEV** catalog status with federal remediation due dates (`kev=True` filter) — both public, keyless sources. Filter by the **parsed CVSS v3.x exposure fields** — `attack_vector` (N/A/L/P), `privileges_required` (N/L/H), `user_interaction` (N/R), and `scope` (U/C) — to isolate, for example, network-reachable zero-click criticals; matching results surface a structured `cvss` object broken out from the raw vector string. Every CVE detail also includes a **references** block of ready-to-open links (MSRC update guide, NVD, EPSS API, and the CISA KEV catalog when the CVE is listed). Add `include_chain=True` to a KB lookup to walk Microsoft-stated **supersedence chains** (which KBs it replaces, newest → oldest). Add `include_guidance=True` to a CVE lookup to surface Microsoft-provided **mitigations, workarounds, and will-not-fix advisories** alongside the vendor-fix KBs. Pass `format="markdown"` or `format="csv"` to a monthly/filtered search to get an additive **triage briefing** — a prioritized executive summary and table (Markdown) or a spreadsheet-ready export with stable columns (CSV) — rendered from the same urgency ranking; the JSON `vulnerabilities` list is always included. Use `force_refresh=True` to bypass the in-process caches and re-fetch the MSRC document and EPSS/KEV enrichment for the request, and `include_freshness=True` to add a **freshness** block reporting the cache age and TTL of the MSRC document and enrichment data. Search a **historical range** instead of a single month with `months_back=N` (the N most recent released months) or `start_month`/`end_month` — the response aggregates matching CVEs across the range and adds per-month **trend** counts; ranges are capped at 12 months and reuse the existing cache/concurrency controls. Set `include_stats=True` for aggregate counts (by severity, impact, product family, exploited, KEV). Use `limit=0` with `include_stats=True` for a stats-only month overview. Filter on **Microsoft's exploitation-likelihood assessment** with `exploitation_likely=True` ("Exploitation More Likely"/"Exploitation Detected"; matches carry an `exploitation_assessment` field) and on **known ransomware campaign use** with `ransomware=True` (from the CISA KEV catalog). Opt into richer rows where you need them: `include_references=True` adds the MSRC/NVD/EPSS/KEV link block to month/KB/trend list results, `include_kev_details=True` replaces the boolean KEV flag with the full catalog entry (due date, required action, vendor/product, ransomware use), `include_kb_details=True` expands KB numbers into full objects with per-KB URL, fixed build, supersedence, sub-type, and **restart-required** status, and `include_temporal=True` adds Microsoft's **CVSS temporal score** to cvss blocks. Filter by **weakness class** with `cwe=` (ID or name substring, e.g. `cwe="CWE-416"`). Use `list_months=True` to fetch the **release catalog** (every available month with initial/current release dates — handy for valid `month=` values and spotting same-month revisions). All new fields are opt-in: the default JSON shape is unchanged.
 
+## Product profiles (watchlists)
+
+Scope any search to the products you actually run. Pass `product_profile="identity-core"` (built-in profiles: `identity-core`, `endpoint`, `server-infrastructure`) or supply ad-hoc `products=["Exchange Server", "Windows Server"]` / `product_families=["Windows", "Azure"]`. A vulnerability is kept if it matches **any** listed product or family. All matching is local — profile contents are never transmitted to MSRC, FIRST.org, CISA, or telemetry.
+
+Override or extend the built-ins by pointing `MSRC_PROFILES_PATH` at a JSON file:
+
+```json
+{
+  "my-estate": {
+    "families": ["Windows", "Azure"],
+    "products": ["Exchange Server", "Microsoft Entra"]
+  }
+}
+```
+
+Each entry may set `products` and/or `families` (case-insensitive partial matchers). A file entry with the same name as a built-in replaces it. An unknown `product_profile`, or a missing/invalid `MSRC_PROFILES_PATH`, returns a clear `invalid_input` error rather than falling back to a broad, unscoped result.
+
+### Companion triage skill
+
+A portable [agent skill](skills/README.md) — `patch-tuesday-triage` — teaches an AI agent how to drive `msrc_search` through the monthly workflow (which searches to run, in what order, how to prioritize). It's plain Markdown and can be **deployed independently of this server**: copy `skills/patch-tuesday-triage/` into your agent's skills directory. See [`skills/README.md`](skills/README.md) for deployment details.
+
+## Guided triage prompt
+
+The server registers an MCP **prompt** named `monthly_triage`. MCP clients that support prompts can select it to get a step-by-step analyst workflow built entirely on `msrc_search` — publicly disclosed zero-days, CISA KEV, exploited, network/no-auth/no-UI criticals, identity-adjacent products, endpoint/Intune, and a briefing. It accepts two optional arguments: `product_profile` (scope the whole workflow to a watchlist) and `month` (triage a specific release). No new tools are introduced — the prompt only orchestrates `msrc_search` calls.
+
+A portable, plain-text copy of this prompt lives under [`prompts/`](prompts/README.md) so the workflow can be used **independently of the server**.
+
 ## Prompt Examples
 
 Once connected to an MCP client, you can ask questions like:
@@ -162,6 +189,8 @@ Once connected to an MCP client, you can ask questions like:
 18. **Deployment planning**: "Does KB5094123 require a restart, and which build fixes it?"
 19. **Weakness class**: "Show me this month's use-after-free vulnerabilities" (`cwe="CWE-416"`)
 20. **Release catalog**: "Which Patch Tuesday months are available to query?"
+21. **Product watchlist**: "Show me this month's Critical CVEs across my estate" (`product_profile="identity-core"`, `severity="Critical"`)
+22. **Guided triage**: "Walk me through this month's triage for my identity estate" (selects the `monthly_triage` prompt with `product_profile="identity-core"`)
 
 ## Usage
 
