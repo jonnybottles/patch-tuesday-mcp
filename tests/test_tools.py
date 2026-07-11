@@ -194,6 +194,143 @@ async def test_kb_with_month():
     assert "Invalid month" in result["error"]
 
 
+# --- Multi-KB batch lookup (kb=[...]) ---
+
+
+async def test_kb_list_returns_grouped_results():
+    result = await msrc_search(kb=["5094123", "KB5094127"])
+    assert "error" not in result
+    assert result["total_kbs"] == 2
+    assert result["filters_applied"]["kb"] == ["KB5094123", "KB5094127"]
+    assert [r["kb"] for r in result["results"]] == ["KB5094123", "KB5094127"]
+    for entry in result["results"]:
+        assert entry["found"] is True
+        assert entry["month"] == "2026-Jun"
+        assert entry["total_found"] >= 1
+        assert entry["vulnerabilities"]
+        # per-entry filters_applied would be redundant with the top-level one
+        assert "filters_applied" not in entry
+    # top-level total_found aggregates across KBs (telemetry + report use)
+    assert result["total_found"] == sum(e["total_found"] for e in result["results"])
+
+
+async def test_kb_list_single_element_still_grouped():
+    """Shape is determined by input type, not element count."""
+    result = await msrc_search(kb=["5094123"])
+    assert result["total_kbs"] == 1
+    assert result["results"][0]["kb"] == "KB5094123"
+    assert result["results"][0]["found"] is True
+
+
+async def test_kb_string_shape_unchanged_by_batch_feature():
+    """Compatibility contract: a plain-string kb keeps today's flat shape."""
+    result = await msrc_search(kb="5094123")
+    assert "results" not in result
+    assert "total_kbs" not in result
+    assert result["filters_applied"]["kb"] == "KB5094123"
+    assert result["vulnerabilities"]
+
+
+async def test_kb_list_mixed_found_and_not_found():
+    result = await msrc_search(kb=["5094123", "5999999"])
+    assert "error" not in result  # per-KB misses are not a whole-call failure
+    found, missing = result["results"]
+    assert found["kb"] == "KB5094123"
+    assert found["found"] is True
+    assert missing["kb"] == "KB5999999"
+    assert missing["found"] is False
+    assert missing["error_kind"] == "not_found"
+    assert "KB5999999" in missing["error"]
+
+
+async def test_kb_list_upstream_failure_reported_per_kb(monkeypatch):
+    """An upstream outage must not masquerade as per-KB 'not found'."""
+
+    async def fake_get_json(url, timeout=60.0):
+        if url.endswith("/updates"):
+            return INDEX_RESPONSE
+        raise MsrcApiError("MSRC API returned HTTP 503")
+
+    monkeypatch.setattr(msrc_api, "_get_json", fake_get_json)
+    clear_cache()
+
+    result = await msrc_search(kb=["5094123", "5094127"])
+    assert "error" not in result
+    for entry in result["results"]:
+        assert entry["found"] is False
+        assert entry["error_kind"] == "upstream"
+
+
+async def test_kb_list_invalid_entry_fails_whole_call():
+    """A silently dropped KB would make a per-machine patch report wrong."""
+    result = await msrc_search(kb=["5094123", "notakb"])
+    assert result["error_kind"] == "invalid_input"
+    assert "notakb" in result["error"]
+    assert "results" not in result
+
+
+async def test_kb_list_empty_rejected():
+    result = await msrc_search(kb=[])
+    assert result["error_kind"] == "invalid_input"
+
+
+async def test_kb_list_over_cap_rejected():
+    result = await msrc_search(kb=[str(5000000 + i) for i in range(31)])
+    assert result["error_kind"] == "invalid_input"
+    assert "30" in result["error"]
+
+
+async def test_kb_list_dedupes_preserving_order():
+    result = await msrc_search(kb=["KB5094127", "5094123", "5094127"])
+    assert result["total_kbs"] == 2
+    assert [r["kb"] for r in result["results"]] == ["KB5094127", "KB5094123"]
+
+
+async def test_kb_list_fetches_each_month_once(monkeypatch):
+    """The batch must not re-fetch a month per KB — one upstream fetch total."""
+    with open(FIXTURE, encoding="utf-8") as f:
+        cvrf_doc = json.load(f)
+    cvrf_fetches = {"count": 0}
+
+    async def fake_get_json(url, timeout=60.0):
+        if url.endswith("/updates"):
+            return INDEX_RESPONSE
+        if url.endswith("/cvrf/2026-Jun"):
+            cvrf_fetches["count"] += 1
+            return cvrf_doc
+        raise MsrcApiError("not found")
+
+    monkeypatch.setattr(msrc_api, "_get_json", fake_get_json)
+    clear_cache()
+
+    result = await msrc_search(kb=["5094123", "5094127", "5094125"], month="2026-Jun")
+    assert all(e["found"] for e in result["results"])
+    assert cvrf_fetches["count"] == 1
+
+
+async def test_kb_list_with_month_restriction():
+    result = await msrc_search(kb=["5094123"], month="2026-May")
+    assert result["results"][0]["found"] is False
+    assert result["results"][0]["error_kind"] == "not_found"
+    assert result["filters_applied"]["month"] == "2026-May"
+
+
+async def test_kb_list_include_chain(monkeypatch):
+    _patch_chain_months(
+        monkeypatch,
+        {
+            "2026-Jun": _synthetic_month("2026-Jun", "", [("5300003", "5300002")]),
+            "2026-May": _synthetic_month("2026-May", "", [("5300002", None)]),
+        },
+    )
+
+    result = await msrc_search(kb=["5300003", "5300002"], include_chain=True)
+    first, second = result["results"]
+    assert [hop["kb"] for hop in first["supersedence_chain"]] == ["5300003", "5300002"]
+    assert first["chain_complete"] is True
+    assert [hop["kb"] for hop in second["supersedence_chain"]] == ["5300002"]
+
+
 async def test_filters_applied_keeps_false_values():
     result = await msrc_search(exploited=False)
     assert result["filters_applied"]["exploited"] is False
