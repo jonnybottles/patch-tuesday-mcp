@@ -333,11 +333,8 @@ HTTP-mode environment variables:
 |----------|---------|-------------|
 | `MCP_TRANSPORT` | `stdio` | Set to `http` for remote serving |
 | `MCP_HOST` / `MCP_PORT` | `0.0.0.0` / `8000` | Bind address |
-| `RATE_LIMIT_RPM` | `60` | Per-IP requests/minute (`0` disables) |
 | `MCP_MAX_BODY_BYTES` | `262144` | Max request body size, returns 413 above it (`0` disables) |
 | `MCP_CORS_ORIGINS` | `*` (all) | Comma-separated allowlist of browser origins. **Set an explicit list for public deployments** (e.g. `https://app.example.com`) |
-| `MCP_TRUST_X_FORWARDED_FOR` | `true` | Whether the `X-Forwarded-For` header may be used to derive the client IP for rate limiting. Even when `true`, the header is only honored if the request arrives from a **private/loopback peer** (an ingress proxy) or a listed trusted proxy — a directly exposed public peer can never forge it. Set to `false` to ignore the header entirely |
-| `MCP_TRUSTED_PROXIES` | unset | Comma-separated proxy IPs. When set, `X-Forwarded-For` is only honored if the request arrives via one of these proxies, and the client is resolved as the right-most hop that is not itself a trusted proxy (unwinds chained proxies). The startup log reports only how many entries are pinned, never the values |
 | `MCP_LIMIT_CONCURRENCY` | `40` | Max concurrent in-flight connections; uvicorn responds 503 beyond it (`0` disables) |
 | `MCP_TIMEOUT_KEEP_ALIVE` | `15` | Seconds before idle keep-alive connections are closed |
 | `MCP_LOG_LEVEL` | `WARNING` | Root log level (`DEBUG`/`INFO`/`WARNING`/`ERROR`/`CRITICAL`); logs go to stderr |
@@ -345,9 +342,9 @@ HTTP-mode environment variables:
 | `MCP_ENRICHMENT_MAX_RESPONSE_BYTES` | `33554432` (32 MiB) | Cap on a single EPSS/KEV upstream response body |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | unset | Opt-in usage telemetry (requires `pip install patch-tuesday-mcp[telemetry]`) |
 
-HTTP mode also serves `GET /health` (liveness endpoint, exempt from rate
-limiting) and runs stateless, so it can scale to multiple replicas behind a
-load balancer without session affinity.
+HTTP mode also serves `GET /health` (liveness endpoint) and runs stateless,
+so it can scale to multiple replicas behind a load balancer without session
+affinity.
 
 ### Hardening a public HTTP deployment
 
@@ -362,16 +359,9 @@ to the internet:
   organization's standard access control in front of it.
 - **Restrict CORS.** Set `MCP_CORS_ORIGINS` to the exact origins of your MCP
   clients instead of the permissive `*` default.
-- **Set the proxy trust correctly.** When behind a reverse proxy, leave
-  `MCP_TRUST_X_FORWARDED_FOR=true` and (ideally) set `MCP_TRUSTED_PROXIES` to
-  your proxy/ingress IP(s) so per-IP rate limiting keys on the real client.
-  The default is already forge-resistant: without an allowlist, the header is
-  only honored when the request arrives from a private/loopback peer, so a
-  directly exposed container ignores forged headers automatically.
-- **Keep the defaults on.** Leave `RATE_LIMIT_RPM`, `MCP_MAX_BODY_BYTES`, and
+- **Keep the defaults on.** Leave `MCP_MAX_BODY_BYTES` and
   `MCP_LIMIT_CONCURRENCY` at their defaults (or tighten them) — they are your
-  first line of defense against floods, oversized payloads, and connection
-  exhaustion.
+  first line of defense against oversized payloads and connection exhaustion.
 - **Upstream reads are bounded and redirect-free.** Responses from MSRC/EPSS/
   KEV are size-capped while streaming and HTTP redirects are never followed,
   so a misbehaving upstream can't exhaust container memory.
