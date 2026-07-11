@@ -134,6 +134,37 @@ async def test_live_force_refresh_and_freshness_metadata():
     assert "freshness" not in default
 
 
+async def test_live_kb_known_issues_statuses():
+    """Drift canary for the support.microsoft.com known-issues scrape.
+
+    KB5094126 (June 2026 Windows 11 cumulative) is an archived page with
+    published known issues; if Microsoft changes the page layout this fails
+    (status becomes "unavailable") and the parser needs updating.
+    """
+    from patch_tuesday_mcp.feeds import known_issues
+
+    result = await known_issues.fetch_known_issues("5094126")
+    assert result["status"] == "published", result
+    assert result["source_url"].startswith("https://support.microsoft.com/")
+    assert result["issues"]
+    for issue in result["issues"]:
+        assert issue["title"]
+
+    # A page without a known-issues section (SharePoint) is an explicit
+    # none_published, and a bogus KB's fuzzy redirect must not be trusted.
+    none = await known_issues.fetch_known_issues("5002880")
+    assert none["status"] == "none_published", none
+    bogus = await known_issues.fetch_known_issues("9999999")
+    assert bogus["status"] == "none_published", bogus
+
+
+async def test_live_kb_known_issues_through_tool():
+    result = await msrc_search(kb="5094126", include_known_issues=True)
+    block = result["known_issues"]
+    assert block["status"] in {"published", "none_published"}, block
+    assert result["filters_applied"]["include_known_issues"] is True
+
+
 async def test_live_trend_search_across_recent_months():
     result = await msrc_search(months_back=3, limit=50)
     assert "error" not in result, result.get("error")

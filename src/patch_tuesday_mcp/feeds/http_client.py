@@ -44,6 +44,17 @@ async def aclose() -> None:
     _client = None
 
 
+async def get_location(url: str, *, timeout: float) -> tuple[int, str | None]:
+    """GET a URL without reading the body; return (status, Location header or None).
+
+    Lets a caller resolve one redirect hop manually — validating the target
+    itself — while the shared client keeps follow_redirects=False.
+    """
+    client = get_client()
+    async with client.stream("GET", url, timeout=timeout) as response:
+        return response.status_code, response.headers.get("location")
+
+
 async def get_bounded(
     url: str,
     *,

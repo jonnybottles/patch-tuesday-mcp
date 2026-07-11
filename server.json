@@ -6,12 +6,12 @@
     "url": "https://github.com/jonnybottles/patch-tuesday-mcp",
     "source": "github"
   },
-  "version": "0.7.0",
+  "version": "0.8.0",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "patch-tuesday-mcp",
-      "version": "0.7.0",
+      "version": "0.8.0",
       "transport": {
         "type": "stdio"
       }
