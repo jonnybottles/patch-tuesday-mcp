@@ -1,0 +1,26 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.jonnybottles/patch-tuesday",
+  "description": "Query Microsoft Patch Tuesday security updates (MSRC) with EPSS and CISA KEV enrichment",
+  "repository": {
+    "url": "https://github.com/jonnybottles/patch-tuesday-mcp",
+    "source": "github"
+  },
+  "version": "0.7.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "patch-tuesday-mcp",
+      "version": "0.7.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp"
+    }
+  ]
+}
