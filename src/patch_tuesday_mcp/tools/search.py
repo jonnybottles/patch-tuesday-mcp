@@ -9,7 +9,7 @@ from typing import Annotated
 from pydantic import Field
 
 from .. import telemetry
-from ..feeds import enrichment, msrc_api
+from ..feeds import enrichment, known_issues, msrc_api
 from ..feeds.msrc_api import MsrcApiError
 from ..models.vulnerability import (
     EXPLOITATION_LIKELY_VALUES,
@@ -82,6 +82,7 @@ async def msrc_search(
     include_references: bool = False,
     include_kb_details: bool = False,
     include_kev_details: bool = False,
+    include_known_issues: bool = False,
     include_temporal: bool = False,
     list_months: bool = False,
     format: str = "json",
@@ -122,6 +123,9 @@ async def msrc_search(
       per-KB result entry each, with per-KB found/not-found status
     - Check whether a KB has been superseded by newer patches (kb="5087538",
       include_chain=True) -- walks Microsoft-stated supersedence links
+    - See what Microsoft has confirmed an update breaks (kb=...,
+      include_known_issues=True) -- known issues from the KB's public support
+      page: symptoms, workarounds, and the resolving update when stated
     - Find KEV-listed CVEs this month (kev=True) -- confirmed exploited, with
       federal remediation due dates
     - High exploitation probability (min_epss=0.5) -- EPSS >= 50%
@@ -226,6 +230,20 @@ async def msrc_search(
             entry (due_date, ransomware_use, required_action, vendor_project,
             product, vulnerability_name) instead of a boolean flag; on cve=
             lookups it extends the kev block with the extra catalog fields.
+        include_known_issues: When True together with kb=, adds a known_issues
+            block per KB with the issues Microsoft has publicly confirmed for
+            that update (title, symptoms, workaround, and the resolving KB
+            when stated), scraped best-effort from the KB's support page on
+            support.microsoft.com. This reports what Microsoft has confirmed
+            breaks -- it does not predict behavior in a specific environment.
+            The block's status field is honest about coverage: "published"
+            (issues listed), "none_published" (Microsoft publishes no
+            known-issues data for this KB -- the norm for most non-Windows
+            products; Windows cumulative/preview updates are the main
+            source), or "unavailable" (the page could not be fetched or
+            parsed; NOT the same as no issues). Attached even when the KB is
+            not found in MSRC security releases (e.g. preview-only updates).
+            Ignored without kb=.
         include_temporal: When True, cvss blocks gain the CVSS temporal score
             Microsoft publishes (exploit-code maturity adjusted). Applies to
             cve= detail and to list rows that carry a cvss block.
@@ -277,6 +295,11 @@ async def msrc_search(
         - stats: (only when include_stats=True) aggregate counts
         - supersedence_chain / chain_complete: (only for kb= lookups with
           include_chain=True) the walked chain, newest to oldest
+        - known_issues: (only for kb= lookups with include_known_issues=True)
+          per-KB block with status ("published" / "none_published" /
+          "unavailable"), an issues list (title, symptoms, workaround,
+          resolution, resolved_by) when published, a note otherwise, and the
+          source_url of the Microsoft support page
         - total_kbs / results: (only when kb= is a list) grouped batch output;
           results holds one entry per KB with kb, found, and either the
           single-KB response body or a per-KB error/error_kind, while the
@@ -331,6 +354,7 @@ async def msrc_search(
             include_references=include_references,
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
+            include_known_issues=include_known_issues,
             include_temporal=include_temporal,
             list_months=list_months,
             format=format,
@@ -393,6 +417,7 @@ async def _search_impl(
     include_references: bool,
     include_kb_details: bool,
     include_kev_details: bool,
+    include_known_issues: bool,
     include_temporal: bool,
     list_months: bool,
     format: str,
@@ -429,6 +454,7 @@ async def _search_impl(
             include_references=include_references,
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
+            include_known_issues=include_known_issues,
         )
     if kb:
         return await _lookup_kb(
@@ -441,6 +467,7 @@ async def _search_impl(
             include_references=include_references,
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
+            include_known_issues=include_known_issues,
         )
 
     # --- Release-catalog discovery: which months exist ---
@@ -962,6 +989,44 @@ async def _lookup_kb(
     include_references: bool = False,
     include_kb_details: bool = False,
     include_kev_details: bool = False,
+    include_known_issues: bool = False,
+) -> dict:
+    """Single-KB lookup, optionally decorated with Microsoft's known issues.
+
+    The known-issues block is best-effort and attaches even when the KB is
+    absent from MSRC security releases (preview-only updates publish known
+    issues too) — but never to an invalid_input error, where there is no
+    usable KB number to look up.
+    """
+    response = await _lookup_kb_msrc(
+        kb,
+        include_chain,
+        month,
+        limit,
+        offset,
+        force_refresh,
+        include_references=include_references,
+        include_kb_details=include_kb_details,
+        include_kev_details=include_kev_details,
+        include_known_issues=include_known_issues,
+    )
+    if include_known_issues and response.get("error_kind") != "invalid_input":
+        kb_number = kb.strip().upper().removeprefix("KB").strip()
+        response["known_issues"] = await known_issues.fetch_known_issues(kb_number)
+    return response
+
+
+async def _lookup_kb_msrc(
+    kb: str,
+    include_chain: bool = False,
+    month: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
+    force_refresh: bool = False,
+    include_references: bool = False,
+    include_kb_details: bool = False,
+    include_kev_details: bool = False,
+    include_known_issues: bool = False,
 ) -> dict:
     kb_number = kb.strip().upper().removeprefix("KB").strip()
     filters_applied = {"kb": f"KB{kb_number}"}
@@ -972,6 +1037,7 @@ async def _lookup_kb(
         ("include_references", include_references),
         ("include_kb_details", include_kb_details),
         ("include_kev_details", include_kev_details),
+        ("include_known_issues", include_known_issues),
     ):
         if flag:
             filters_applied[name] = True
@@ -1069,6 +1135,7 @@ async def _lookup_kbs(
     include_references: bool = False,
     include_kb_details: bool = False,
     include_kev_details: bool = False,
+    include_known_issues: bool = False,
 ) -> dict:
     """Batched KB lookup: one grouped response with a per-KB result entry.
 
@@ -1091,6 +1158,7 @@ async def _lookup_kbs(
         ("include_references", include_references),
         ("include_kb_details", include_kb_details),
         ("include_kev_details", include_kev_details),
+        ("include_known_issues", include_known_issues),
     ):
         if flag:
             filters_applied[name] = True
@@ -1117,6 +1185,11 @@ async def _lookup_kbs(
             filters_applied,
         )
 
+    if include_known_issues:
+        # Warm the known-issues cache for the whole batch concurrently; the
+        # per-KB lookups below are then served from it.
+        await known_issues.prefetch(kb_numbers)
+
     results: list[dict] = []
     total_found = 0
     for number in kb_numbers:
@@ -1130,6 +1203,7 @@ async def _lookup_kbs(
             include_references=include_references,
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
+            include_known_issues=include_known_issues,
         )
         single.pop("filters_applied", None)
         entry = {"kb": f"KB{number}", "found": "error" not in single, **single}

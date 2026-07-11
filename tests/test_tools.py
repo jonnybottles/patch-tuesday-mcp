@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from patch_tuesday_mcp.feeds import enrichment, msrc_api
+from patch_tuesday_mcp.feeds import enrichment, known_issues, msrc_api
 from patch_tuesday_mcp.feeds.enrichment import EnrichmentError
 from patch_tuesday_mcp.feeds.msrc_api import MsrcApiError, clear_cache
 from patch_tuesday_mcp.tools import search as search_module
@@ -36,6 +36,7 @@ INDEX_RESPONSE = {
 def mock_api(monkeypatch):
     clear_cache()
     enrichment.clear_cache()
+    known_issues.clear_cache()
 
     with open(FIXTURE, encoding="utf-8") as f:
         cvrf_doc = json.load(f)
@@ -61,11 +62,18 @@ def mock_api(monkeypatch):
             return {"vulnerabilities": []}
         raise EnrichmentError(f"unexpected URL in test: {url}")
 
+    async def fake_fetch_kb_page(kb_number):
+        # Default: the known-issues source is unreachable, so any accidental
+        # opt-in degrades to "unavailable" and no test ever touches the network.
+        raise known_issues.KnownIssuesError("no known-issues page in test")
+
     monkeypatch.setattr(msrc_api, "_get_json", fake_get_json)
     monkeypatch.setattr(enrichment, "_get_json", fake_enrichment_get_json)
+    monkeypatch.setattr(known_issues, "_fetch_kb_page", fake_fetch_kb_page)
     yield
     clear_cache()
     enrichment.clear_cache()
+    known_issues.clear_cache()
 
 
 def _set_enrichment(
@@ -1467,3 +1475,111 @@ async def test_profile_contents_not_echoed_in_filters(monkeypatch, tmp_path):
     filters = result["filters_applied"]
     assert filters.get("product_profile") == "secretwatch"
     assert "Contoso Internal App" not in json.dumps(filters)
+
+
+# --- kb= known issues (include_known_issues, opt-in) ---
+
+
+KI_FIXTURE = Path(__file__).parent / "fixtures" / "kb_known_issues.html"
+KI_NO_SECTION_FIXTURE = Path(__file__).parent / "fixtures" / "kb_no_issues_section.html"
+
+
+def _set_known_issues_page(monkeypatch, html_by_kb: dict[str, str]) -> list:
+    """Serve canned support pages per KB number; unknown KBs have no page."""
+    calls = []
+
+    async def fake_fetch_kb_page(kb_number):
+        calls.append(kb_number)
+        if kb_number in html_by_kb:
+            url = f"https://support.microsoft.com/en-us/topic/kb{kb_number}-test"
+            return (url, html_by_kb[kb_number])
+        return (None, None)
+
+    monkeypatch.setattr(known_issues, "_fetch_kb_page", fake_fetch_kb_page)
+    known_issues.clear_cache()
+    return calls
+
+
+def _ki_html_for(kb_number: str) -> str:
+    # The real fixture page is about KB5094126; re-target its KB token so the
+    # wrong-landing-page validation accepts it for the requested KB.
+    return KI_FIXTURE.read_text(encoding="utf-8").replace("5094126", kb_number)
+
+
+async def test_kb_default_output_has_no_known_issues_key():
+    single = await msrc_search(kb="5094123")
+    assert "error" not in single
+    assert "known_issues" not in single
+    assert "include_known_issues" not in single["filters_applied"]
+
+    batch = await msrc_search(kb=["5094123"])
+    assert "known_issues" not in batch["results"][0]
+
+
+async def test_kb_include_known_issues_attaches_published_block(monkeypatch):
+    _set_known_issues_page(monkeypatch, {"5094123": _ki_html_for("5094123")})
+    result = await msrc_search(kb="5094123", include_known_issues=True)
+
+    assert "error" not in result
+    assert result["total_found"] > 0, "the MSRC lookup itself must be unchanged"
+    block = result["known_issues"]
+    assert block["status"] == "published"
+    assert len(block["issues"]) == 2
+    assert block["issues"][1]["resolved_by"] == "KB5095093"
+    assert block["source_url"].startswith("https://support.microsoft.com/")
+    assert result["filters_applied"]["include_known_issues"] is True
+
+
+async def test_kb_include_known_issues_failure_leaves_lookup_intact():
+    # mock_api's default known-issues fetch raises: the KB lookup must still
+    # succeed, with the block explicitly marked unavailable (never missing,
+    # never masquerading as "none published").
+    result = await msrc_search(kb="5094123", include_known_issues=True)
+    assert "error" not in result
+    assert result["total_found"] > 0
+    assert result["vulnerabilities"]
+    assert result["known_issues"]["status"] == "unavailable"
+
+
+async def test_kb_include_known_issues_none_published(monkeypatch):
+    html = KI_NO_SECTION_FIXTURE.read_text(encoding="utf-8").replace("5002880", "5094123")
+    _set_known_issues_page(monkeypatch, {"5094123": html})
+    result = await msrc_search(kb="5094123", include_known_issues=True)
+    block = result["known_issues"]
+    assert block["status"] == "none_published"
+    assert "issues" not in block
+
+
+async def test_kb_not_found_still_carries_known_issues(monkeypatch):
+    # Preview/optional updates publish known-issues pages but are absent from
+    # MSRC security releases; the block still attaches to the not_found error.
+    _set_known_issues_page(monkeypatch, {"1111111": _ki_html_for("1111111")})
+    result = await msrc_search(kb="1111111", include_known_issues=True)
+    assert result["error_kind"] == "not_found"
+    assert result["known_issues"]["status"] == "published"
+
+
+async def test_kb_list_include_known_issues_per_entry(monkeypatch):
+    _set_known_issues_page(monkeypatch, {"5094123": _ki_html_for("5094123")})
+    result = await msrc_search(kb=["5094123", "1111111"], include_known_issues=True)
+
+    assert result["filters_applied"]["include_known_issues"] is True
+    found, missing = result["results"]
+    assert found["kb"] == "KB5094123"
+    assert found["found"] is True
+    assert found["known_issues"]["status"] == "published"
+    assert missing["kb"] == "KB1111111"
+    assert missing["found"] is False
+    assert missing["known_issues"]["status"] == "none_published"
+
+
+async def test_kb_list_default_shape_unchanged_by_known_issues_feature():
+    result = await msrc_search(kb=["5094123", "1111111"])
+    for entry in result["results"]:
+        assert "known_issues" not in entry
+
+
+async def test_kb_invalid_input_skips_known_issues():
+    result = await msrc_search(kb="Release Notes", include_known_issues=True)
+    assert result["error_kind"] == "invalid_input"
+    assert "known_issues" not in result

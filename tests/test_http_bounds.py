@@ -106,3 +106,19 @@ async def test_shared_client_does_not_follow_redirects():
     assert client.follow_redirects is False, (
         "redirects could point off the hardcoded hosts; the client must not follow them"
     )
+
+
+async def test_get_location_returns_redirect_without_following(monkeypatch):
+    response = FakeStreamResponse(
+        status_code=301, body=b"ignored", headers={"location": "/en-us/topic/some-slug"}
+    )
+    _use_fake_client(monkeypatch, response)
+    status, location = await http_client.get_location("https://support.microsoft.com/x", timeout=5)
+    assert (status, location) == (301, "/en-us/topic/some-slug")
+    assert response.body_consumed is False, "get_location must not read the body"
+
+
+async def test_get_location_returns_none_on_non_redirect(monkeypatch):
+    _use_fake_client(monkeypatch, FakeStreamResponse(status_code=200, body=b"page"))
+    status, location = await http_client.get_location("https://support.microsoft.com/x", timeout=5)
+    assert (status, location) == (200, None)
