@@ -37,6 +37,19 @@ On Windows in this repo use `.venv/Scripts/python -m pytest` etc. — the venv w
 - `middleware/` — per-IP token-bucket rate limit and request body cap, both with telemetry callbacks (`on_request`/`on_throttled`, `on_rejected`). X-Forwarded-For is honored only from private/loopback peers or `MCP_TRUSTED_PROXIES` members — a public direct peer can never forge it.
 - `telemetry.py` — optional App Insights events (tool_call, msrc_fetch with `cache_hit`, enrichment_fetch, http_request, http_throttled, http_rejected_body); no-op unless `APPLICATIONINSIGHTS_CONNECTION_STRING` is set.
 
+## Session-start check: pending third-party listings
+
+**At the start of every session, run these checks and report the results to the user before other work.** When an item is resolved (merged/listed/confirmed), remove it from this list in a follow-up commit so the list stays current. All listings were submitted 2026-07-11.
+
+1. **awesome-mcp-servers PR** — merged yet? `gh pr view 9879 --repo punkpeye/awesome-mcp-servers --json state,mergedAt` (all bot requirements met: Glama listing, badge, score A 4.8/5.0).
+2. **Docker MCP Catalog PR** — CI green / review status? `gh pr view 4400 --repo docker/mcp-registry --json state,statusCheckRollup` (their CI builds the image itself; `server.yaml` pins `MCP_TRANSPORT=stdio` via config.env — if CI fails, fix in the fork branch `jonnybottles/mcp-registry:add-patch-tuesday`).
+3. **Glama hosted connector** — approved yet? Check https://glama.ai/mcp/connectors?query=patch-tuesday for the ACA endpoint entry (the open-source *server* listing is already live and scored).
+4. **PulseMCP auto-listing** — expected ~1 week after the 2026-07-11 registry publish: check https://www.pulsemcp.com/servers?q=patch-tuesday (they ingest the official MCP Registry; if absent after 2026-07-20, email hello@pulsemcp.com).
+5. **Smithery deployment** — healthy and listed? https://smithery.ai/servers/xxbutler86xx/patch-tuesday (first deployment was still processing at submission time).
+6. **Monthly draft routine** (only in the week after a Patch Tuesday) — did the Wednesday run open a `briefing/YYYY-MM` PR and email drafts to the user? Routine: https://claude.ai/code/routines/trig_01X24fvnRGhC6Lop3NRjVaJh
+
+Standing follow-ups (no check needed, do when convenient): upload a social-preview image (repo Settings → Social preview); bump the PyPI classifier to `Development Status :: 4 - Beta` with the next release (requires version bump + `uv lock` + full deploy verification).
+
 ## Key Constraints
 
 - **Single tool by design.** New capabilities hang off `msrc_search` parameters, never new tools — keeps client tool selection lean. MCP prompts (e.g. `monthly_triage`) are fine as long as they only orchestrate `msrc_search` calls.
