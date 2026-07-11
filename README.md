@@ -2,6 +2,11 @@
 
 # Patch Tuesday MCP Server
 
+[![patch-tuesday-mcp MCP server](https://glama.ai/mcp/servers/jonnybottles/patch-tuesday-mcp/badges/score.svg)](https://glama.ai/mcp/servers/jonnybottles/patch-tuesday-mcp)
+[![PyPI](https://img.shields.io/pypi/v/patch-tuesday-mcp)](https://pypi.org/project/patch-tuesday-mcp/)
+[![MCP Registry](https://img.shields.io/badge/MCP_Registry-io.github.jonnybottles%2Fpatch--tuesday-blue)](https://registry.modelcontextprotocol.io/v0/servers?search=patch-tuesday)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 mcp-name: io.github.jonnybottles/patch-tuesday
 
 Ask your AI assistant about Microsoft security updates. This Python-based MCP (Model Context Protocol) server connects AI assistants like Claude, Copilot, and ChatGPT to the [MSRC Security Update Guide](https://msrc.microsoft.com/update-guide) — the authoritative source for every CVE Microsoft patches — enabling natural-language queries over Patch Tuesday releases: CVEs, KB articles, severity ratings, CVSS scores, affected products, and exploited-in-the-wild status.
