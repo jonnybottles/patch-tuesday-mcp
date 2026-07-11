@@ -28,6 +28,9 @@ _CVE_RE = re.compile(r"^CVE-\d{4}-\d{4,}$", re.IGNORECASE)
 # How many recent months a KB lookup scans before giving up
 KB_SCAN_MONTHS = 6
 
+# How many KB numbers a single batched kb=[...] lookup accepts
+MAX_KB_BATCH = 30
+
 # Supersedence chain walking: max hops followed and how many monthly docs
 # (starting at the queried KB's month) may be scanned for predecessors
 CHAIN_MAX_DEPTH = 12
@@ -55,7 +58,7 @@ CVSS_FILTER_VALUES = {
 async def msrc_search(
     query: str | None = None,
     cve: str | None = None,
-    kb: str | None = None,
+    kb: str | list[str] | None = None,
     month: str | None = None,
     product: str | None = None,
     product_profile: str | None = None,
@@ -114,6 +117,9 @@ async def msrc_search(
       FAQs, EPSS score, and KEV status
     - Find which CVEs a KB article fixes (kb="5094123" or kb="KB5094123") --
       scans recent months, or a specific month when combined with month=
+    - Look up many KBs in one call (kb=["5094123", "KB5094127", ...], up to
+      30) -- e.g. a machine's installed-update list; returns one grouped
+      per-KB result entry each, with per-KB found/not-found status
     - Check whether a KB has been superseded by newer patches (kb="5087538",
       include_chain=True) -- walks Microsoft-stated supersedence links
     - Find KEV-listed CVEs this month (kev=True) -- confirmed exploited, with
@@ -142,12 +148,18 @@ async def msrc_search(
         cve: Optional CVE ID (e.g. "CVE-2026-41108"). Fast path: ignores other
             filters and returns full detail for that single CVE, searching
             across all months automatically.
-        kb: Optional KB article number (e.g. "5094123" or "KB5094123"). Fast
-            path: returns the CVEs fixed by that KB, scanning the most recent
-            months (up to 6), or only the given month when month= is also set.
-            Honors limit/offset; other filters are ignored. Accepts numeric KB
-            ids only; kb_articles in results may also contain non-KB vendor-fix
-            labels such as "Release Notes", which cannot be looked up here.
+        kb: Optional KB article number (e.g. "5094123" or "KB5094123") or a
+            list of up to 30 of them for a batched lookup. Fast path: returns
+            the CVEs fixed by that KB, scanning the most recent months (up to
+            6), or only the given month when month= is also set. A list input
+            returns a grouped response instead: a results array with one entry
+            per KB ("kb", "found", and on success the same body as a
+            single-KB lookup; on a miss "error"/"error_kind"), deduplicated,
+            order preserved. limit/offset apply per KB; other filters are
+            ignored. Accepts numeric KB ids only (any malformed list entry
+            fails the whole call); kb_articles in results may also contain
+            non-KB vendor-fix labels such as "Release Notes", which cannot be
+            looked up here.
         month: Optional monthly release to search, formatted "2026-Apr" or
             "2026-04". Defaults to the most recent release whose Patch
             Tuesday (second Tuesday of the month) has already occurred; pass
@@ -265,6 +277,10 @@ async def msrc_search(
         - stats: (only when include_stats=True) aggregate counts
         - supersedence_chain / chain_complete: (only for kb= lookups with
           include_chain=True) the walked chain, newest to oldest
+        - total_kbs / results: (only when kb= is a list) grouped batch output;
+          results holds one entry per KB with kb, found, and either the
+          single-KB response body or a per-KB error/error_kind, while the
+          top-level total_found sums across all KBs
         - guidance: (only for cve= lookups with include_guidance=True) list of
           mitigation/workaround/will-not-fix advisories, when Microsoft
           provides them
@@ -353,7 +369,7 @@ async def msrc_search(
 async def _search_impl(
     query: str | None,
     cve: str | None,
-    kb: str | None,
+    kb: str | list[str] | None,
     month: str | None,
     product: str | None,
     product_profile: str | None,
@@ -402,6 +418,18 @@ async def _search_impl(
         )
 
     # --- KB fast path: which CVEs does this KB fix ---
+    if isinstance(kb, list):
+        return await _lookup_kbs(
+            kb,
+            include_chain,
+            month,
+            limit,
+            offset,
+            force_refresh,
+            include_references=include_references,
+            include_kb_details=include_kb_details,
+            include_kev_details=include_kev_details,
+        )
     if kb:
         return await _lookup_kb(
             kb,
@@ -1029,6 +1057,91 @@ async def _lookup_kb(
         filters_applied,
         kind="not_found",
     )
+
+
+async def _lookup_kbs(
+    kbs: list[str],
+    include_chain: bool = False,
+    month: str | None = None,
+    limit: int = 10,
+    offset: int = 0,
+    force_refresh: bool = False,
+    include_references: bool = False,
+    include_kb_details: bool = False,
+    include_kev_details: bool = False,
+) -> dict:
+    """Batched KB lookup: one grouped response with a per-KB result entry.
+
+    Each KB resolves through the same scan as a single-KB lookup; the
+    in-process month cache guarantees every monthly document is fetched
+    upstream at most once for the whole batch. A KB that is not found (or
+    whose scan hit upstream failures) becomes a found=False entry rather
+    than failing the batch; malformed input fails the whole call because a
+    silently dropped KB would corrupt any report built on the result.
+    """
+    normalized = [str(raw).strip().upper().removeprefix("KB").strip() for raw in kbs]
+    seen: set[str] = set()
+    kb_numbers = [n for n in normalized if not (n in seen or seen.add(n))]
+
+    filters_applied: dict = {"kb": [f"KB{n}" for n in kb_numbers]}
+    if month is not None:
+        filters_applied["month"] = month
+    for name, flag in (
+        ("include_chain", include_chain),
+        ("include_references", include_references),
+        ("include_kb_details", include_kb_details),
+        ("include_kev_details", include_kev_details),
+    ):
+        if flag:
+            filters_applied[name] = True
+    if force_refresh:
+        filters_applied["force_refresh"] = True
+
+    if not kb_numbers:
+        return _error(
+            "kb= was an empty list. Provide at least one KB number, e.g. ['5094123'].",
+            filters_applied,
+        )
+    invalid = sorted({raw for raw, n in zip(kbs, normalized) if not n.isdigit()})
+    if invalid:
+        return _error(
+            f"Invalid KB number(s): {', '.join(repr(v) for v in invalid)}. Expected "
+            "numeric KB ids like '5094123' or 'KB5094123'. kb_articles entries such as "
+            "'Release Notes' are vendor-fix labels, not KB ids.",
+            filters_applied,
+        )
+    if len(kb_numbers) > MAX_KB_BATCH:
+        return _error(
+            f"Too many KB numbers ({len(kb_numbers)} after deduplication); a single "
+            f"call accepts at most {MAX_KB_BATCH}. Split the list across calls.",
+            filters_applied,
+        )
+
+    results: list[dict] = []
+    total_found = 0
+    for number in kb_numbers:
+        single = await _lookup_kb(
+            number,
+            include_chain,
+            month,
+            limit,
+            offset,
+            force_refresh,
+            include_references=include_references,
+            include_kb_details=include_kb_details,
+            include_kev_details=include_kev_details,
+        )
+        single.pop("filters_applied", None)
+        entry = {"kb": f"KB{number}", "found": "error" not in single, **single}
+        total_found += entry.get("total_found", 0)
+        results.append(entry)
+
+    return {
+        "total_kbs": len(results),
+        "total_found": total_found,
+        "results": results,
+        "filters_applied": filters_applied,
+    }
 
 
 async def _list_months(force_refresh: bool) -> dict:

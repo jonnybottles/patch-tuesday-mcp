@@ -205,6 +205,32 @@ async def test_kb_fast_path_finds_fixing_cves(endpoint_url):
 
 
 @pytest.mark.endpoint_upstream
+async def test_kb_batch_lookup_groups_results(endpoint_url):
+    async with _mcp_client(endpoint_url) as client:
+        search = await _default_search(client)
+        kbs = list(
+            dict.fromkeys(
+                kb
+                for v in search["vulnerabilities"]
+                for kb in v.get("kb_articles", [])
+                if str(kb).isdigit()
+            )
+        )
+        if not kbs:
+            pytest.skip("no numeric KB articles on the sampled vulnerabilities this month")
+        batch = kbs[:2]
+        payload = _payload(await client.call_tool("msrc_search", {"kb": batch, "limit": 3}))
+    assert "error" not in payload, payload.get("error")
+    assert payload["total_kbs"] == len(batch)
+    assert payload["filters_applied"]["kb"] == [f"KB{k}" for k in batch]
+    assert [entry["kb"] for entry in payload["results"]] == [f"KB{k}" for k in batch]
+    for entry in payload["results"]:
+        assert entry["found"] is True
+        assert entry["total_found"] > 0
+        assert entry["vulnerabilities"]
+
+
+@pytest.mark.endpoint_upstream
 async def test_list_months_catalog(endpoint_url):
     async with _mcp_client(endpoint_url) as client:
         payload = _payload(await client.call_tool("msrc_search", {"list_months": True}))
