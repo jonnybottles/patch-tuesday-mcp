@@ -1,5 +1,8 @@
 """Tests for the EPSS / CISA KEV enrichment clients (mocked HTTP)."""
 
+import json
+import re
+
 import pytest
 
 from patch_tuesday_mcp.feeds import enrichment
@@ -108,6 +111,24 @@ async def test_kev_caching_and_parse(mock_api):
     await fetch_kev()
     kev_calls = [c for c in mock_api if "cisa.gov" in c]
     assert len(kev_calls) == 1, "catalog is cached within the TTL"
+
+
+async def test_epss_values_rounded_to_source_precision(monkeypatch):
+    """EPSS publishes 5-decimal values; parsed floats must not carry more digits."""
+
+    async def fake_get_json(url, timeout=30.0):
+        return {
+            "status": "OK",
+            "data": [
+                {"cve": "CVE-2026-11645", "epss": "0.016540000", "percentile": "0.831549999"}
+            ],
+        }
+
+    monkeypatch.setattr(enrichment, "_get_json", fake_get_json)
+    score, percentile = (await fetch_epss(["CVE-2026-11645"]))["CVE-2026-11645"]
+    assert score == 0.01654
+    assert percentile == 0.83155
+    assert not re.search(r"\d\.\d{6,}", json.dumps([score, percentile]))
 
 
 async def test_fetch_failures_return_empty(monkeypatch):
