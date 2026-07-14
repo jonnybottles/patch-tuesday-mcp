@@ -43,8 +43,7 @@ On Windows in this repo use `.venv/Scripts/python -m pytest` etc. — the venv w
 **At the start of every session, run these checks and report the results to the user before other work.** When an item is resolved (merged/listed/confirmed), remove it from this list in a follow-up commit so the list stays current. All listings were submitted 2026-07-11.
 
 1. **Docker MCP Catalog PR** — CI green / review status? `gh pr view 4400 --repo docker/mcp-registry --json state,statusCheckRollup` (their CI builds the image itself; `server.yaml` pins `MCP_TRANSPORT=stdio` via config.env — if CI fails, fix in the fork branch `jonnybottles/mcp-registry:add-patch-tuesday`).
-2. **Smithery deployment** — healthy and listed? https://smithery.ai/servers/xxbutler86xx/patch-tuesday (first deployment was still processing at submission time).
-3. **Monthly draft routine** (only in the week after a Patch Tuesday) — did the Wednesday run open a `briefing/YYYY-MM` PR and email drafts to the user? Routine: https://claude.ai/code/routines/trig_01X24fvnRGhC6Lop3NRjVaJh
+2. **Monthly draft routine** (only in the week after a Patch Tuesday) — did the Wednesday run open a `briefing/YYYY-MM` PR and email drafts to the user? Routine: https://claude.ai/code/routines/trig_01X24fvnRGhC6Lop3NRjVaJh
 
 Standing follow-ups (no check needed, do when convenient): upload a social-preview image (repo Settings → Social preview).
 
