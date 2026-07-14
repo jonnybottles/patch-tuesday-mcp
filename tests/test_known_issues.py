@@ -124,6 +124,55 @@ def test_parse_block_without_title_is_skipped():
     assert len(result["issues"]) == 1, "a titleless block must be skipped, not invented"
 
 
+# --- Parser: the /servicing/ layout (2026 site migration) ---
+
+
+def test_parse_servicing_layout_published():
+    result = known_issues._parse_known_issues(
+        _load("kb_servicing_layout.html"), "5094126", SOURCE_URL
+    )
+    assert result["status"] == "published"
+    issues = result["issues"]
+    assert len(issues) == 2
+
+    office = issues[0]
+    assert office["title"] == (
+        "Microsoft Office applications might fail to open from certain third-party apps"
+    )
+    assert "OLE automation" in office["symptoms"]
+    assert "open the application or document directly" in office["resolution"]
+    assert "resolved_by" not in office
+
+    recycle = issues[1]
+    assert recycle["title"] == "Deleting from Recycle Bin displays an internal file name"
+    assert "$Rxxxxx.ext" in recycle["symptoms"]
+    assert recycle["resolved_by"] == "KB5095093"
+
+
+def test_parse_servicing_layout_first_section_only():
+    # The combined SSU+LCU page repeats the known-issues <h3>; only the first
+    # section may be parsed, and neighbor sections must not bleed in.
+    result = known_issues._parse_known_issues(
+        _load("kb_servicing_layout.html"), "5094126", SOURCE_URL
+    )
+    titles = " ".join(issue["title"] for issue in result["issues"])
+    assert "Duplicate section" not in titles
+    assert "How to get this update" not in titles
+    assert "Servicing stack" not in titles
+
+
+def test_parse_servicing_layout_none_aware_is_none_published():
+    html = (
+        '<title>June 9, 2026 KB5094126 | Microsoft Support</title>'
+        '<h3 id="known-issues-in-this-update"><strong>Known issues in this update'
+        "</strong></h3><p>Microsoft is not currently aware of any issues with "
+        "this update.</p><h2>How to get this update</h2>"
+    )
+    result = known_issues._parse_known_issues(html, "5094126", SOURCE_URL)
+    assert result["status"] == "none_published"
+    assert "not currently aware of any issues" in result["note"]
+
+
 # --- Parser: none published ---
 
 
@@ -157,16 +206,17 @@ def test_parse_drifted_markup_is_unavailable_with_pointer():
     assert result["source_url"] == SOURCE_URL
 
 
-# --- _fetch_kb_page: redirect policy (manual, single hop, same host only) ---
+# --- _fetch_kb_page: redirect policy (manual, bounded hops, same host only) ---
 
 
-def _patch_transport(monkeypatch, *, location_status=301, location=None,
-                     body_status=200, body=b"<html>ok</html>"):
+def _patch_transport(monkeypatch, *, hops, body_status=200, body=b"<html>ok</html>"):
+    """Serve a scripted (status, location) sequence; the last hop repeats."""
     fetched = []
 
     async def fake_get_location(url, *, timeout):
         fetched.append(("head", url))
-        return (location_status, location)
+        status, location = hops[min(len(fetched) - 1, len(hops) - 1)]
+        return (status, location)
 
     async def fake_get_bounded(url, *, headers=None, timeout, max_bytes):
         fetched.append(("get", url))
@@ -178,40 +228,79 @@ def _patch_transport(monkeypatch, *, location_status=301, location=None,
 
 
 async def test_fetch_follows_single_same_host_relative_redirect(monkeypatch):
-    fetched = _patch_transport(monkeypatch, location="/en-us/topic/some-kb-slug")
+    fetched = _patch_transport(
+        monkeypatch, hops=[(301, "/en-us/topic/some-kb-slug"), (200, None)]
+    )
     url, html = await known_issues._fetch_kb_page("5094126")
     assert url == "https://support.microsoft.com/en-us/topic/some-kb-slug"
     assert html == "<html>ok</html>"
     assert ("get", url) in fetched
 
 
+async def test_fetch_follows_two_hop_chain_to_servicing_page(monkeypatch):
+    # The live site today: /help -> /topic -> /servicing/os/... -> 200.
+    servicing = "https://support.microsoft.com/en-US/servicing/os/windows-10/2026/06/x"
+    fetched = _patch_transport(
+        monkeypatch,
+        hops=[(301, "/en-us/topic/some-kb-slug"), (301, servicing), (200, None)],
+    )
+    url, html = await known_issues._fetch_kb_page("5094126")
+    assert url == servicing
+    assert html == "<html>ok</html>"
+    assert ("get", servicing) in fetched
+
+
+async def test_fetch_redirect_loop_is_bounded(monkeypatch):
+    fetched = _patch_transport(monkeypatch, hops=[(301, "/en-us/topic/loop")])
+    with pytest.raises(KnownIssuesError, match="redirected more than"):
+        await known_issues._fetch_kb_page("5094126")
+    heads = [f for f in fetched if f[0] == "head"]
+    assert len(heads) == known_issues.MAX_REDIRECT_HOPS + 1
+    assert not [f for f in fetched if f[0] == "get"], "a looping chain must never be read"
+
+
 async def test_fetch_accepts_absolute_same_host_https_redirect(monkeypatch):
     _patch_transport(
-        monkeypatch, location="https://support.microsoft.com/en-us/topic/some-kb-slug"
+        monkeypatch,
+        hops=[(301, "https://support.microsoft.com/en-us/topic/some-kb-slug"), (200, None)],
     )
     url, _ = await known_issues._fetch_kb_page("5094126")
     assert url == "https://support.microsoft.com/en-us/topic/some-kb-slug"
 
 
 async def test_fetch_rejects_cross_host_redirect(monkeypatch):
-    _patch_transport(monkeypatch, location="https://evil.example.com/en-us/topic/x")
+    _patch_transport(monkeypatch, hops=[(301, "https://evil.example.com/en-us/topic/x")])
+    with pytest.raises(KnownIssuesError):
+        await known_issues._fetch_kb_page("5094126")
+
+
+async def test_fetch_rejects_cross_host_redirect_mid_chain(monkeypatch):
+    _patch_transport(
+        monkeypatch,
+        hops=[(301, "/en-us/topic/fine"), (301, "https://evil.example.com/x")],
+    )
     with pytest.raises(KnownIssuesError):
         await known_issues._fetch_kb_page("5094126")
 
 
 async def test_fetch_rejects_redirect_without_location(monkeypatch):
-    _patch_transport(monkeypatch, location=None)
+    _patch_transport(monkeypatch, hops=[(301, None)])
     with pytest.raises(KnownIssuesError):
         await known_issues._fetch_kb_page("5094126")
 
 
 async def test_fetch_404_means_no_page(monkeypatch):
-    _patch_transport(monkeypatch, location_status=404)
+    _patch_transport(monkeypatch, hops=[(404, None)])
+    assert await known_issues._fetch_kb_page("5094126") == (None, None)
+
+
+async def test_fetch_404_mid_chain_means_no_page(monkeypatch):
+    _patch_transport(monkeypatch, hops=[(301, "/en-us/topic/gone"), (404, None)])
     assert await known_issues._fetch_kb_page("5094126") == (None, None)
 
 
 async def test_fetch_direct_200_reads_original_url(monkeypatch):
-    fetched = _patch_transport(monkeypatch, location_status=200)
+    fetched = _patch_transport(monkeypatch, hops=[(200, None)])
     url, html = await known_issues._fetch_kb_page("5094126")
     assert url == known_issues.SUPPORT_KB_URL.format(kb="5094126")
     assert html == "<html>ok</html>"
@@ -219,13 +308,13 @@ async def test_fetch_direct_200_reads_original_url(monkeypatch):
 
 
 async def test_fetch_landing_non_200_raises(monkeypatch):
-    _patch_transport(monkeypatch, location="/en-us/topic/x", body_status=500)
+    _patch_transport(monkeypatch, hops=[(301, "/en-us/topic/x"), (200, None)], body_status=500)
     with pytest.raises(KnownIssuesError):
         await known_issues._fetch_kb_page("5094126")
 
 
 async def test_fetch_unexpected_first_hop_status_raises(monkeypatch):
-    _patch_transport(monkeypatch, location_status=503)
+    _patch_transport(monkeypatch, hops=[(503, None)])
     with pytest.raises(KnownIssuesError):
         await known_issues._fetch_kb_page("5094126")
 

@@ -16,12 +16,18 @@ status:
   masquerade as "no known issues".
 
 Fetch failures never raise into a search; ``fetch_known_issues`` always
-returns a dict. Two quirks of the source shape this module: the /help/<kb>
-URL answers with a single same-host redirect to the canonical article (we
-follow exactly one validated hop; the shared client never follows redirects
-on its own), and unknown KB numbers redirect to *unrelated* articles — which
+returns a dict. Quirks of the source that shape this module: the /help/<kb>
+URL answers with a short chain of same-host redirects to the canonical
+article (historically one hop to /topic/...; the 2026 site migration added a
+second hop to /servicing/os/...), so we follow a bounded number of hops,
+validating each target ourselves — the shared client never follows redirects
+on its own. Unknown KB numbers redirect to *unrelated* articles — which
 still echo the requested id in an analytics meta tag — so a landing page is
-only trusted when its URL slug or its title names the requested KB.
+only trusted when its URL slug or its title names the requested KB. Two
+markup generations coexist: legacy pages use ``ocpSection``/``ocpExpando``
+divs with ``<b class="ocpLegacyBold">`` segment labels, while the newer
+/servicing/ pages use ``<details>``/``<summary>`` blocks with ``<strong>``
+labels under an ``<h3>`` heading; both are parsed.
 """
 
 import asyncio
@@ -46,6 +52,7 @@ MAX_RESPONSE_BYTES = int(os.getenv("MCP_KNOWN_ISSUES_MAX_RESPONSE_BYTES", str(4 
 KNOWN_ISSUES_TTL_SECONDS = 6 * 3600
 MAX_CACHE_ENTRIES = 500  # parsed results are ~1-4 KB, so worst case ~2 MB
 FETCH_CONCURRENCY = 3
+MAX_REDIRECT_HOPS = 3  # /help -> /topic -> /servicing today; one spare
 
 # A known-issues section with no parseable issue entries is an explicit
 # "none" statement when its prose is short; anything longer suggests issue
@@ -93,23 +100,36 @@ def _elapsed_ms(start: float) -> float:
 
 # --- HTML parsing (stdlib only; the source publishes no structured format) ---
 
-# The section heading as observed on Windows/.NET update pages; tolerate the
-# small wording variants Microsoft has used over the years.
+# The section heading across both markup generations: legacy pages carry the
+# text directly in an <h2>, the newer /servicing/ pages wrap it in inline
+# tags (e.g. <strong>) under an <h3>. Tolerate the small wording variants
+# Microsoft has used over the years.
 _HEADING_RE = re.compile(
-    r"<h2[^>]*>[^<]*known issues (?:in|with) this (?:security )?update", re.IGNORECASE
+    r"<h(?P<level>[23])[^>]*>\s*(?:<[a-z][^>]*>\s*)*[^<]*"
+    r"known issues (?:in|with) this (?:security )?update",
+    re.IGNORECASE,
 )
-# The known-issues section ends where the next top-level section or heading
-# starts; issue entries inside it are div-based, never <section>.
+# Legacy layout: the section ends at the next top-level section or <h2>;
+# issue entries inside it are div-based, never <section>, and legacy issue
+# bodies may legitimately contain <h3> tags.
 _REGION_END_RE = re.compile(r"<h2[\s>]|<section\s", re.IGNORECASE)
+# /servicing/ layout: the <h3> section ends at the next heading of either
+# level (the page repeats the section under a second <h3> for the combined
+# SSU+LCU package — only the first is parsed).
+_REGION_END_NEW_RE = re.compile(r"<h[23][\s>]", re.IGNORECASE)
 _ISSUE_BLOCK_RE = re.compile(r'<div class="ocpSection">', re.IGNORECASE)
 _ISSUE_TITLE_RE = re.compile(
     r'class="ocpExpandoHeadTitleContainer"[^>]*>(?P<title>.*?)</div>', re.DOTALL
 )
 _ISSUE_BODY_RE = re.compile(r'class="ocpExpandoBody"[^>]*>', re.IGNORECASE)
-# Bold paragraph labels segmenting an issue body.
+# /servicing/ layout: one collapsible <details> element per issue.
+_DETAILS_RE = re.compile(r"<details[\s>].*?</details>", re.IGNORECASE | re.DOTALL)
+_SUMMARY_RE = re.compile(r"<summary[^>]*>(?P<title>.*?)</summary>", re.IGNORECASE | re.DOTALL)
+# Bold paragraph labels segmenting an issue body (legacy <b>, servicing <strong>).
 _MARKER_RE = re.compile(
-    r'<b class="ocpLegacyBold">[^<]*?(?P<label>symptoms?|workaround|next steps?|resolution)'
-    r"[^<]*?</b>",
+    r'<(?:b class="ocpLegacyBold"|strong)[^>]*>[^<]*?'
+    r"(?P<label>symptoms?|workaround|next steps?|resolution)"
+    r"[^<]*?</(?:b|strong)>",
     re.IGNORECASE,
 )
 _RESOLVED_BY_RE = re.compile(
@@ -168,7 +188,17 @@ def _segment_issue_body(body_html: str) -> dict[str, str]:
     return {field: " ".join(parts) for field, parts in segments.items()}
 
 
+def _attach_resolved_by(issue: dict) -> dict:
+    resolved = _RESOLVED_BY_RE.search(
+        f"{issue.get('workaround', '')} {issue.get('resolution', '')}"
+    )
+    if resolved:
+        issue["resolved_by"] = f"KB{resolved.group(1)}"
+    return issue
+
+
 def _parse_issue_block(block_html: str) -> dict | None:
+    """Parse a legacy ocpSection issue block."""
     title_match = _ISSUE_TITLE_RE.search(block_html)
     if not title_match:
         return None
@@ -180,13 +210,21 @@ def _parse_issue_block(block_html: str) -> dict | None:
     body_match = _ISSUE_BODY_RE.search(block_html)
     if body_match:
         issue.update(_segment_issue_body(block_html[body_match.end() :]))
+    return _attach_resolved_by(issue)
 
-    resolved = _RESOLVED_BY_RE.search(
-        f"{issue.get('workaround', '')} {issue.get('resolution', '')}"
-    )
-    if resolved:
-        issue["resolved_by"] = f"KB{resolved.group(1)}"
-    return issue
+
+def _parse_details_block(block_html: str) -> dict | None:
+    """Parse a /servicing/-layout <details> issue block."""
+    title_match = _SUMMARY_RE.search(block_html)
+    if not title_match:
+        return None
+    title = _text(title_match.group("title"))
+    if not title:
+        return None
+
+    issue: dict = {"title": title}
+    issue.update(_segment_issue_body(block_html[title_match.end() :]))
+    return _attach_resolved_by(issue)
 
 
 def _parse_known_issues(html: str, kb_number: str, source_url: str) -> dict:
@@ -207,7 +245,8 @@ def _parse_known_issues(html: str, kb_number: str, source_url: str) -> dict:
         }
 
     tail = html[heading.end() :]
-    region_end = _REGION_END_RE.search(tail)
+    end_re = _REGION_END_RE if heading.group("level") == "2" else _REGION_END_NEW_RE
+    region_end = end_re.search(tail)
     region = tail[: region_end.start()] if region_end else tail
 
     issues = []
@@ -215,6 +254,11 @@ def _parse_known_issues(html: str, kb_number: str, source_url: str) -> dict:
         issue = _parse_issue_block(block)
         if issue:
             issues.append(issue)
+    if not issues:
+        for match in _DETAILS_RE.finditer(region):
+            issue = _parse_details_block(match.group(0))
+            if issue:
+                issues.append(issue)
 
     if issues:
         return {"status": "published", "issues": issues, "source_url": source_url}
@@ -256,23 +300,32 @@ def _resolve_redirect(location: str | None) -> str:
 
 
 async def _fetch_kb_page(kb_number: str) -> tuple[str | None, str | None]:
-    """Fetch the support page for a KB, following one validated redirect hop.
+    """Fetch the support page for a KB, following bounded validated redirects.
 
-    Returns (final_url, html), or (None, None) when Microsoft has no page for
-    this KB. Raises KnownIssuesError for anything that is a retrieval failure
-    rather than a definitive absence.
+    The /help/{kb} resolver answers with a short same-host redirect chain to
+    the canonical article (currently two hops: /topic/... then
+    /servicing/os/...); each hop's target is validated before following and
+    the hop count is capped at MAX_REDIRECT_HOPS. Returns (final_url, html),
+    or (None, None) when Microsoft has no page for this KB. Raises
+    KnownIssuesError for anything that is a retrieval failure rather than a
+    definitive absence.
     """
-    url = SUPPORT_KB_URL.format(kb=kb_number)
+    target = SUPPORT_KB_URL.format(kb=kb_number)
     try:
-        status, location = await http_client.get_location(url, timeout=30.0)
-        if status == 404:
-            return None, None
-        if status in _REDIRECT_STATUSES:
-            target = _resolve_redirect(location)
-        elif status == 200:
-            target = url
-        else:
+        for _ in range(MAX_REDIRECT_HOPS + 1):
+            status, location = await http_client.get_location(target, timeout=30.0)
+            if status == 404:
+                return None, None
+            if status == 200:
+                break
+            if status in _REDIRECT_STATUSES:
+                target = _resolve_redirect(location)
+                continue
             raise KnownIssuesError(f"KB page lookup returned HTTP {status}")
+        else:
+            raise KnownIssuesError(
+                f"KB page redirected more than {MAX_REDIRECT_HOPS} times"
+            )
 
         body_status, body = await http_client.get_bounded(
             target, timeout=30.0, max_bytes=MAX_RESPONSE_BYTES
