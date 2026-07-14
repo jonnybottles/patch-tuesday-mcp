@@ -187,8 +187,11 @@ async def fetch_epss(
             for entry in data.get("data", []):
                 cve = entry.get("cve")
                 try:
-                    score = float(entry["epss"])
-                    percentile = float(entry["percentile"])
+                    # EPSS publishes decimal strings at 5-significant-decimal
+                    # precision; round once here so no downstream view can
+                    # surface float-repr digits beyond what the source states.
+                    score = round(float(entry["epss"]), 5)
+                    percentile = round(float(entry["percentile"]), 5)
                 except (KeyError, TypeError, ValueError):
                     continue
                 if cve:

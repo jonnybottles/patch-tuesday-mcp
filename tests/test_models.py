@@ -9,6 +9,7 @@ from patch_tuesday_mcp.models.vulnerability import (
     MonthlyRelease,
     Vulnerability,
     _parse_vulnerability,
+    compute_stats,
     parse_cvrf,
     parse_exploit_status,
     sort_vulnerabilities,
@@ -116,6 +117,30 @@ def test_stats(release):
     severities = {s["name"] for s in stats["by_severity"]}
     assert "Critical" in severities
     assert stats["by_product_family"], "expected family counts"
+
+
+def test_stats_severity_buckets_sum_to_total():
+    """Entries without a rating get an explicit bucket so counts reconcile."""
+    vulns = [
+        Vulnerability(cve="CVE-2026-1", severity="Critical", impact="Remote Code Execution"),
+        Vulnerability(cve="CVE-2026-2"),  # Chromium-style: no severity, no impact
+        Vulnerability(cve="CVE-2026-3", severity="Important"),
+    ]
+    stats = compute_stats(vulns)
+    assert sum(e["count"] for e in stats["by_severity"]) == stats["total"] == 3
+    assert {"name": "Unrated", "count": 1} in stats["by_severity"]
+    assert sum(e["count"] for e in stats["by_impact"]) == stats["total"]
+    assert {"name": "Unspecified", "count": 2} in stats["by_impact"]
+
+
+def test_stats_no_placeholder_buckets_when_fully_rated():
+    vulns = [
+        Vulnerability(cve="CVE-2026-1", severity="Critical", impact="Spoofing"),
+        Vulnerability(cve="CVE-2026-2", severity="Low", impact="Spoofing"),
+    ]
+    stats = compute_stats(vulns)
+    names = {e["name"] for e in stats["by_severity"]} | {e["name"] for e in stats["by_impact"]}
+    assert "Unrated" not in names and "Unspecified" not in names
 
 
 def test_sort_exploited_first(release):
