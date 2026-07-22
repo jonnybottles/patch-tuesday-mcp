@@ -1,33 +1,42 @@
-"""Microsoft-confirmed known issues for a KB, scraped from its support page.
+"""Per-KB data scraped from the Microsoft support page: known issues + summary.
 
-Microsoft publishes no keyless API for known-issues data (the Graph
-windowsupdates API requires an AAD tenant), so this feed reads the public
-per-KB support page — https://support.microsoft.com/en-us/help/<kb> — and
-parses its "Known issues in this update" section. The source is unstructured
-HTML, so retrieval is strictly best-effort and every result carries an honest
-status:
+Microsoft publishes no keyless API for this data (the Graph windowsupdates
+API requires an AAD tenant), so this feed reads the public per-KB support
+page — https://support.microsoft.com/en-us/help/<kb> — and serves two
+response blocks from a single fetch and combined cache record:
 
-- ``published``: the section parsed into structured issue entries.
-- ``none_published``: Microsoft publishes no known-issues data for this KB
-  (no per-KB page, no section on the page, or an explicit "not aware of any
-  issues" statement). Common for non-Windows products.
+- ``fetch_known_issues``: the "Known issues in this update" section.
+- ``fetch_update_summary``: what the update changes — the page's
+  Summary/Highlights text plus its Improvements bullet list (size-capped via
+  ``_SUMMARY_MAX_CHARS`` / ``_MAX_IMPROVEMENT_ITEMS`` /
+  ``_IMPROVEMENT_ITEM_MAX_CHARS``; a capped block carries ``truncated``).
+
+The source is unstructured HTML, so retrieval is strictly best-effort and
+every block carries an honest status:
+
+- ``published``: the section parsed into structured content.
+- ``none_published``: Microsoft publishes no such data for this KB (no
+  per-KB page, or no section on the page). Common for non-Windows products.
 - ``unavailable``: the page could not be fetched or no longer parses (layout
   drift). Never reported as ``none_published`` — an upstream failure must not
-  masquerade as "no known issues".
+  masquerade as "nothing published".
 
-Fetch failures never raise into a search; ``fetch_known_issues`` always
-returns a dict. Quirks of the source that shape this module: the /help/<kb>
-URL answers with a short chain of same-host redirects to the canonical
-article (historically one hop to /topic/...; the 2026 site migration added a
-second hop to /servicing/os/...), so we follow a bounded number of hops,
-validating each target ourselves — the shared client never follows redirects
-on its own. Unknown KB numbers redirect to *unrelated* articles — which
-still echo the requested id in an analytics meta tag — so a landing page is
-only trusted when its URL slug or its title names the requested KB. Two
-markup generations coexist: legacy pages use ``ocpSection``/``ocpExpando``
-divs with ``<b class="ocpLegacyBold">`` segment labels, while the newer
+Fetch failures never raise into a search; both fetchers always return a
+dict. A record is only cached when neither block is ``unavailable``, so a
+transient failure (or partial layout drift) is never pinned for a TTL.
+
+Quirks of the source that shape this module: the /help/<kb> URL answers with
+a short chain of same-host redirects to the canonical article (historically
+one hop to /topic/...; the 2026 site migration added a second hop to
+/servicing/os/...), so we follow a bounded number of hops, validating each
+target ourselves — the shared client never follows redirects on its own.
+Unknown KB numbers redirect to *unrelated* articles — which still echo the
+requested id in an analytics meta tag — so a landing page is only trusted
+when its URL slug or its title names the requested KB. Two markup
+generations coexist: legacy pages use ``ocpSection``/``ocpExpando`` divs
+with ``<b class="ocpLegacyBold">`` segment labels, while the newer
 /servicing/ pages use ``<details>``/``<summary>`` blocks with ``<strong>``
-labels under an ``<h3>`` heading; both are parsed.
+labels under an ``<h3>`` heading; both are parsed, for both blocks.
 """
 
 import asyncio
@@ -50,7 +59,7 @@ SUPPORT_KB_URL = "https://support.microsoft.com/en-us/help/{kb}"
 MAX_RESPONSE_BYTES = int(os.getenv("MCP_KNOWN_ISSUES_MAX_RESPONSE_BYTES", str(4 * 1024 * 1024)))
 
 KNOWN_ISSUES_TTL_SECONDS = 6 * 3600
-MAX_CACHE_ENTRIES = 500  # parsed results are ~1-4 KB, so worst case ~2 MB
+MAX_CACHE_ENTRIES = 500  # combined records are ~2-9 KB, so worst case ~5 MB
 FETCH_CONCURRENCY = 3
 MAX_REDIRECT_HOPS = 3  # /help -> /topic -> /servicing today; one spare
 
@@ -58,6 +67,13 @@ MAX_REDIRECT_HOPS = 3  # /help -> /topic -> /servicing today; one spare
 # "none" statement when its prose is short; anything longer suggests issue
 # content our parser no longer understands (layout drift).
 _NONE_TEXT_MAX_CHARS = 400
+
+# Update-summary size caps: Windows CU pages list dozens of improvement
+# bullets across rollout waves; cap to keep the per-KB response weight (and
+# the cached record) bounded. A capped block carries ``truncated: True``.
+_SUMMARY_MAX_CHARS = 1500
+_MAX_IMPROVEMENT_ITEMS = 20
+_IMPROVEMENT_ITEM_MAX_CHARS = 300
 
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
@@ -284,6 +300,129 @@ def _parse_known_issues(html: str, kb_number: str, source_url: str) -> dict:
     }
 
 
+# --- Update-summary parsing (same page, different section family) ---
+
+# Summary/Highlights heading across both generations: legacy pages carry
+# <h2>Summary</h2> or <h2>Highlights</h2>, servicing pages <h2 id="summary">.
+# Anchored on <h[23] so <summary> tags inside <details> can never match; the
+# lookahead keeps the closing "<" out of the match so slicing at end() lands
+# right after the heading text.
+_SUMMARY_HEADING_RE = re.compile(
+    r"<h[23][^>]*>\s*(?:<[a-z][^>]*>\s*)*(?:summary|highlights)\s*(?=<)",
+    re.IGNORECASE,
+)
+# The summary region is intro prose (plus Highlights bullets on legacy
+# pages); in both layouts it ends at the next heading or section boundary.
+_SUMMARY_REGION_END_RE = re.compile(r"<h[23][\s>]|<section\s", re.IGNORECASE)
+# Improvements headings ("Improvements", "Improvements and fixes") plus the
+# servicing per-rollout subsections, which can appear directly under Summary
+# without a parent Improvements heading.
+_IMPROVEMENTS_HEADING_RE = re.compile(
+    r"<h(?P<level>[23])[^>]*>\s*(?:<[a-z][^>]*>\s*)*"
+    r"(?:improvements|gradual rollout|normal rollout)",
+    re.IGNORECASE,
+)
+# Section headings whose bullets must never be harvested as improvements
+# (guards a level-2 region from swallowing a following <h3> section).
+_SUMMARY_EXCLUDE_RE = re.compile(
+    r"<h[23][^>]*>\s*(?:<[a-z][^>]*>\s*)*[^<]*"
+    r"(?:known issues|servicing stack|how to get|file information)",
+    re.IGNORECASE,
+)
+_LI_RE = re.compile(r"<li[^>]*>(?P<item>.*?)</li>", re.IGNORECASE | re.DOTALL)
+_ANCHOR_RE = re.compile(r"<a\s[^>]*>.*?</a>", re.IGNORECASE | re.DOTALL)
+_H1_RE = re.compile(r"<h1[^>]*>(?P<text>.*?)</h1>", re.IGNORECASE | re.DOTALL)
+_TITLE_TAG_RE = re.compile(r"<title[^>]*>(?P<text>.*?)</title>", re.IGNORECASE | re.DOTALL)
+_TITLE_SUFFIX_RE = re.compile(r"\s*[-|]\s*Microsoft Support\s*$", re.IGNORECASE)
+
+
+def _parse_update_summary(html: str, kb_number: str, source_url: str) -> dict:
+    """Parse a KB support page into the update-summary result contract.
+
+    Pure and side-effect free; returns a ``published`` / ``none_published`` /
+    ``unavailable`` dict as documented in the module docstring.
+    """
+    truncated = False
+
+    title = ""
+    title_match = _H1_RE.search(html) or _TITLE_TAG_RE.search(html)
+    if title_match:
+        title = _TITLE_SUFFIX_RE.sub("", _text(title_match.group("text")))
+
+    heading = _SUMMARY_HEADING_RE.search(html)
+    summary = ""
+    if heading:
+        tail = html[heading.end() :]
+        end = _SUMMARY_REGION_END_RE.search(tail)
+        summary = _text(tail[: end.start()] if end else tail)
+        if len(summary) > _SUMMARY_MAX_CHARS:
+            summary = summary[:_SUMMARY_MAX_CHARS].rstrip() + "..."
+            truncated = True
+
+    items: list[str] = []
+    for imp in _IMPROVEMENTS_HEADING_RE.finditer(html):
+        tail = html[imp.end() :]
+        # Same level rule as known issues: a legacy <h2> region legitimately
+        # contains <h3> expando blocks, a servicing <h3> ends at any heading.
+        end_re = _REGION_END_RE if imp.group("level") == "2" else _REGION_END_NEW_RE
+        end = end_re.search(tail)
+        region = tail[: end.start()] if end else tail
+        excluded = _SUMMARY_EXCLUDE_RE.search(region)
+        if excluded:
+            region = region[: excluded.start()]
+        for li in _LI_RE.finditer(region):
+            item_html = li.group("item")
+            text = _text(item_html)
+            if not text:
+                continue
+            # CU pages open the Improvements section with links to the prior
+            # preview updates / release notes; an item that is nothing but
+            # anchors (plus punctuation) is a reference, not an improvement.
+            residue = _text(_ANCHOR_RE.sub(" ", item_html))
+            if not re.sub(r"[\W_]+", "", residue):
+                continue
+            items.append(text)
+
+    items = list(dict.fromkeys(items))  # SSU+LCU combined pages repeat sections
+    if len(items) > _MAX_IMPROVEMENT_ITEMS:
+        items = items[:_MAX_IMPROVEMENT_ITEMS]
+        truncated = True
+    for i, item in enumerate(items):
+        if len(item) > _IMPROVEMENT_ITEM_MAX_CHARS:
+            items[i] = item[:_IMPROVEMENT_ITEM_MAX_CHARS].rstrip() + "..."
+            truncated = True
+
+    if summary or items:
+        result: dict = {"status": "published", "source_url": source_url}
+        if title:
+            result["title"] = title
+        if summary:
+            result["summary"] = summary
+        if items:
+            result["improvements"] = items
+        if truncated:
+            result["truncated"] = True
+        return result
+    if heading:
+        return {
+            "status": "unavailable",
+            "note": (
+                "A summary section exists on the Microsoft support page but could not "
+                "be parsed (the page layout may have changed); consult the source "
+                "page directly."
+            ),
+            "source_url": source_url,
+        }
+    return {
+        "status": "none_published",
+        "note": (
+            f"The Microsoft support page for KB{kb_number} does not publish a "
+            "summary or improvements section."
+        ),
+        "source_url": source_url,
+    }
+
+
 # --- Fetching ---
 
 
@@ -369,11 +508,12 @@ def _cache_put(kb_number: str, result: dict) -> None:
         del _cache[next(iter(_cache))]
 
 
-async def fetch_known_issues(kb_number: str) -> dict:
-    """Best-effort known-issues lookup for a numeric KB id ("5094123").
+async def _fetch_kb_record(kb_number: str) -> dict:
+    """Fetch + parse the KB support page once, serving both response blocks.
 
-    Never raises: failures degrade to {"status": "unavailable", ...}. Results
-    are cached in-process for KNOWN_ISSUES_TTL_SECONDS (failures are not).
+    Returns ``{"known_issues": ..., "update_summary": ...}``; never raises.
+    Cached only when neither block is ``unavailable`` — a transient failure
+    (or partial layout drift) must not be pinned for a whole TTL.
     """
     cached = _cache_get(kb_number)
     if cached is not None:
@@ -386,28 +526,50 @@ async def fetch_known_issues(kb_number: str) -> dict:
         if html is None or not _page_matches_kb(final_url, html, kb_number):
             # No page, or a landing page that cannot be verified as this KB's:
             # report "no per-KB page" rather than trust another article's data.
-            result = {
-                "status": "none_published",
-                "note": (
-                    f"Microsoft publishes no per-KB support page for KB{kb_number}, "
-                    "so no known-issues data is available for this update."
-                ),
+            no_page = (
+                f"Microsoft publishes no per-KB support page for KB{kb_number}, so no "
+                "{what} is available for this update."
+            )
+            record = {
+                "known_issues": {
+                    "status": "none_published",
+                    "note": no_page.format(what="known-issues data"),
+                },
+                "update_summary": {
+                    "status": "none_published",
+                    "note": no_page.format(what="update summary"),
+                },
             }
         else:
-            result = _parse_known_issues(html, kb_number, final_url)
+            record = {
+                "known_issues": _parse_known_issues(html, kb_number, final_url),
+                "update_summary": _parse_update_summary(html, kb_number, final_url),
+            }
     except Exception as exc:  # fail open: enrichment must never break a lookup
-        logger.warning("known-issues fetch failed for KB%s: %s", kb_number, exc)
+        logger.warning("KB support-page fetch failed for KB%s: %s", kb_number, exc)
         telemetry.track_event(
             "enrichment_fetch",
             {"source": "known_issues", "ok": False, "duration_ms": _elapsed_ms(start)},
         )
+        source_url = SUPPORT_KB_URL.format(kb=kb_number)
         return {
-            "status": "unavailable",
-            "note": (
-                "The Microsoft support page for this KB could not be retrieved; retry "
-                "later or check the page directly. This does not mean no issues exist."
-            ),
-            "source_url": SUPPORT_KB_URL.format(kb=kb_number),
+            "known_issues": {
+                "status": "unavailable",
+                "note": (
+                    "The Microsoft support page for this KB could not be retrieved; "
+                    "retry later or check the page directly. This does not mean no "
+                    "issues exist."
+                ),
+                "source_url": source_url,
+            },
+            "update_summary": {
+                "status": "unavailable",
+                "note": (
+                    "The Microsoft support page for this KB could not be retrieved; "
+                    "retry later or check the page directly."
+                ),
+                "source_url": source_url,
+            },
         }
 
     telemetry.track_event(
@@ -416,15 +578,34 @@ async def fetch_known_issues(kb_number: str) -> dict:
             "source": "known_issues",
             "ok": True,
             "duration_ms": _elapsed_ms(start),
-            "status": result["status"],
+            "status": record["known_issues"]["status"],
+            "summary_status": record["update_summary"]["status"],
         },
     )
-    if result["status"] != "unavailable":
-        _cache_put(kb_number, result)
-    return result
+    if all(block["status"] != "unavailable" for block in record.values()):
+        _cache_put(kb_number, record)
+    return record
+
+
+async def fetch_known_issues(kb_number: str) -> dict:
+    """Best-effort known-issues lookup for a numeric KB id ("5094123").
+
+    Never raises: failures degrade to {"status": "unavailable", ...}. Results
+    are cached in-process for KNOWN_ISSUES_TTL_SECONDS (failures are not).
+    """
+    return (await _fetch_kb_record(kb_number))["known_issues"]
+
+
+async def fetch_update_summary(kb_number: str) -> dict:
+    """Best-effort what-this-update-changes summary for a numeric KB id.
+
+    Never raises. Shares its fetch, trust check, and cache record with
+    fetch_known_issues — requesting both blocks costs one page retrieval.
+    """
+    return (await _fetch_kb_record(kb_number))["update_summary"]
 
 
 async def prefetch(kb_numbers: list[str]) -> None:
     """Warm the cache for a KB batch; concurrency is semaphore-bounded and
     failures are swallowed (each lookup already fails open)."""
-    await asyncio.gather(*(fetch_known_issues(kb) for kb in kb_numbers))
+    await asyncio.gather(*(_fetch_kb_record(kb) for kb in kb_numbers))

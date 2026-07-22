@@ -1583,3 +1583,87 @@ async def test_kb_invalid_input_skips_known_issues():
     result = await msrc_search(kb="Release Notes", include_known_issues=True)
     assert result["error_kind"] == "invalid_input"
     assert "known_issues" not in result
+
+
+# --- kb= update summary (include_update_summary, opt-in) ---
+
+
+async def test_kb_default_output_has_no_update_summary_key():
+    single = await msrc_search(kb="5094123")
+    assert "error" not in single
+    assert "update_summary" not in single
+    assert "include_update_summary" not in single["filters_applied"]
+
+    batch = await msrc_search(kb=["5094123"])
+    assert "update_summary" not in batch["results"][0]
+    assert "include_update_summary" not in batch["filters_applied"]
+
+
+async def test_kb_summary_and_known_issues_flags_are_independent(monkeypatch):
+    _set_known_issues_page(monkeypatch, {"5094123": _ki_html_for("5094123")})
+    ki_only = await msrc_search(kb="5094123", include_known_issues=True)
+    assert "update_summary" not in ki_only
+    us_only = await msrc_search(kb="5094123", include_update_summary=True)
+    assert "known_issues" not in us_only
+    assert us_only["update_summary"]["status"] == "published"
+
+
+async def test_kb_include_update_summary_attaches_published_block(monkeypatch):
+    _set_known_issues_page(monkeypatch, {"5094123": _ki_html_for("5094123")})
+    result = await msrc_search(kb="5094123", include_update_summary=True)
+
+    assert "error" not in result
+    assert result["total_found"] > 0, "the MSRC lookup itself must be unchanged"
+    block = result["update_summary"]
+    assert block["status"] == "published"
+    assert "quality improvements" in block["summary"]
+    assert block["improvements"]
+    assert block["source_url"].startswith("https://support.microsoft.com/")
+    assert result["filters_applied"]["include_update_summary"] is True
+
+
+async def test_kb_include_update_summary_failure_leaves_lookup_intact():
+    # mock_api's default support-page fetch raises: the KB lookup must still
+    # succeed, with the block explicitly unavailable (never missing, never
+    # masquerading as "none published").
+    result = await msrc_search(kb="5094123", include_update_summary=True)
+    assert "error" not in result
+    assert result["total_found"] > 0
+    assert result["update_summary"]["status"] == "unavailable"
+
+
+async def test_kb_both_flags_share_one_fetch(monkeypatch):
+    calls = _set_known_issues_page(monkeypatch, {"5094123": _ki_html_for("5094123")})
+    result = await msrc_search(
+        kb="5094123", include_known_issues=True, include_update_summary=True
+    )
+    assert result["known_issues"]["status"] == "published"
+    assert result["update_summary"]["status"] == "published"
+    assert len(calls) == 1, "both opt-in blocks must be served by one page fetch"
+
+
+async def test_kb_not_found_still_carries_update_summary(monkeypatch):
+    # Preview-only updates publish support pages but are absent from MSRC
+    # security releases; the block still attaches to the not_found error.
+    _set_known_issues_page(monkeypatch, {"1111111": _ki_html_for("1111111")})
+    result = await msrc_search(kb="1111111", include_update_summary=True)
+    assert result["error_kind"] == "not_found"
+    assert result["update_summary"]["status"] == "published"
+
+
+async def test_kb_list_include_update_summary_per_entry(monkeypatch):
+    _set_known_issues_page(monkeypatch, {"5094123": _ki_html_for("5094123")})
+    result = await msrc_search(kb=["5094123", "1111111"], include_update_summary=True)
+
+    assert result["filters_applied"]["include_update_summary"] is True
+    found, missing = result["results"]
+    assert found["kb"] == "KB5094123"
+    assert found["update_summary"]["status"] == "published"
+    assert missing["kb"] == "KB1111111"
+    assert missing["update_summary"]["status"] == "none_published"
+
+
+async def test_kb_invalid_input_skips_update_summary():
+    result = await msrc_search(kb="Release Notes", include_update_summary=True)
+    assert result["error_kind"] == "invalid_input"
+    assert "update_summary" not in result
