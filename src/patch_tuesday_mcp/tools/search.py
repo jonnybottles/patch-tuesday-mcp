@@ -83,6 +83,7 @@ async def msrc_search(
     include_kb_details: bool = False,
     include_kev_details: bool = False,
     include_known_issues: bool = False,
+    include_update_summary: bool = False,
     include_temporal: bool = False,
     list_months: bool = False,
     format: str = "json",
@@ -126,6 +127,9 @@ async def msrc_search(
     - See what Microsoft has confirmed an update breaks (kb=...,
       include_known_issues=True) -- known issues from the KB's public support
       page: symptoms, workarounds, and the resolving update when stated
+    - See what an update changes (kb=..., include_update_summary=True) -- the
+      KB support page's summary and improvements highlights, beyond the
+      security fixes already listed in the MSRC data
     - Find KEV-listed CVEs this month (kev=True) -- confirmed exploited, with
       federal remediation due dates
     - High exploitation probability (min_epss=0.5) -- EPSS >= 50%
@@ -244,6 +248,18 @@ async def msrc_search(
             parsed; NOT the same as no issues). Attached even when the KB is
             not found in MSRC security releases (e.g. preview-only updates).
             Ignored without kb=.
+        include_update_summary: When True together with kb=, adds an
+            update_summary block per KB describing what the update changes,
+            scraped best-effort from the same support.microsoft.com KB page:
+            the page's Summary/Highlights text plus its Improvements bullet
+            list (size-capped; truncated=True marks a capped block). The
+            status field is honest like known_issues: "published" (a summary
+            exists), "none_published" (Microsoft publishes no summary section
+            for this KB), or "unavailable" (the page could not be fetched or
+            parsed; NOT the same as no summary). Attached even when the KB is
+            not found in MSRC security releases; combines freely with
+            include_known_issues -- both blocks are served by a single fetch
+            of the same page. Ignored without kb=.
         include_temporal: When True, cvss blocks gain the CVSS temporal score
             Microsoft publishes (exploit-code maturity adjusted). Applies to
             cve= detail and to list rows that carry a cvss block.
@@ -300,6 +316,12 @@ async def msrc_search(
           "unavailable"), an issues list (title, symptoms, workaround,
           resolution, resolved_by) when published, a note otherwise, and the
           source_url of the Microsoft support page
+        - update_summary: (only for kb= lookups with
+          include_update_summary=True) per-KB block with status ("published"
+          / "none_published" / "unavailable"), the page title, a summary
+          string and an improvements list of what the update changes when
+          published (truncated=True when size caps trimmed content), a note
+          otherwise, and the source_url of the Microsoft support page
         - total_kbs / results: (only when kb= is a list) grouped batch output;
           results holds one entry per KB with kb, found, and either the
           single-KB response body or a per-KB error/error_kind, while the
@@ -355,6 +377,7 @@ async def msrc_search(
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
             include_known_issues=include_known_issues,
+            include_update_summary=include_update_summary,
             include_temporal=include_temporal,
             list_months=list_months,
             format=format,
@@ -418,6 +441,7 @@ async def _search_impl(
     include_kb_details: bool,
     include_kev_details: bool,
     include_known_issues: bool,
+    include_update_summary: bool,
     include_temporal: bool,
     list_months: bool,
     format: str,
@@ -455,6 +479,7 @@ async def _search_impl(
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
             include_known_issues=include_known_issues,
+            include_update_summary=include_update_summary,
         )
     if kb:
         return await _lookup_kb(
@@ -468,6 +493,7 @@ async def _search_impl(
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
             include_known_issues=include_known_issues,
+            include_update_summary=include_update_summary,
         )
 
     # --- Release-catalog discovery: which months exist ---
@@ -990,13 +1016,15 @@ async def _lookup_kb(
     include_kb_details: bool = False,
     include_kev_details: bool = False,
     include_known_issues: bool = False,
+    include_update_summary: bool = False,
 ) -> dict:
-    """Single-KB lookup, optionally decorated with Microsoft's known issues.
+    """Single-KB lookup, optionally decorated from the KB's support page.
 
-    The known-issues block is best-effort and attaches even when the KB is
-    absent from MSRC security releases (preview-only updates publish known
-    issues too) — but never to an invalid_input error, where there is no
-    usable KB number to look up.
+    The known-issues and update-summary blocks are best-effort and attach
+    even when the KB is absent from MSRC security releases (preview-only
+    updates publish support pages too) — but never to an invalid_input error,
+    where there is no usable KB number to look up. Both blocks are served by
+    a single fetch of the same page.
     """
     response = await _lookup_kb_msrc(
         kb,
@@ -1009,10 +1037,14 @@ async def _lookup_kb(
         include_kb_details=include_kb_details,
         include_kev_details=include_kev_details,
         include_known_issues=include_known_issues,
+        include_update_summary=include_update_summary,
     )
-    if include_known_issues and response.get("error_kind") != "invalid_input":
+    if response.get("error_kind") != "invalid_input":
         kb_number = kb.strip().upper().removeprefix("KB").strip()
-        response["known_issues"] = await known_issues.fetch_known_issues(kb_number)
+        if include_known_issues:
+            response["known_issues"] = await known_issues.fetch_known_issues(kb_number)
+        if include_update_summary:
+            response["update_summary"] = await known_issues.fetch_update_summary(kb_number)
     return response
 
 
@@ -1027,6 +1059,7 @@ async def _lookup_kb_msrc(
     include_kb_details: bool = False,
     include_kev_details: bool = False,
     include_known_issues: bool = False,
+    include_update_summary: bool = False,
 ) -> dict:
     kb_number = kb.strip().upper().removeprefix("KB").strip()
     filters_applied = {"kb": f"KB{kb_number}"}
@@ -1038,6 +1071,7 @@ async def _lookup_kb_msrc(
         ("include_kb_details", include_kb_details),
         ("include_kev_details", include_kev_details),
         ("include_known_issues", include_known_issues),
+        ("include_update_summary", include_update_summary),
     ):
         if flag:
             filters_applied[name] = True
@@ -1136,6 +1170,7 @@ async def _lookup_kbs(
     include_kb_details: bool = False,
     include_kev_details: bool = False,
     include_known_issues: bool = False,
+    include_update_summary: bool = False,
 ) -> dict:
     """Batched KB lookup: one grouped response with a per-KB result entry.
 
@@ -1159,6 +1194,7 @@ async def _lookup_kbs(
         ("include_kb_details", include_kb_details),
         ("include_kev_details", include_kev_details),
         ("include_known_issues", include_known_issues),
+        ("include_update_summary", include_update_summary),
     ):
         if flag:
             filters_applied[name] = True
@@ -1185,9 +1221,10 @@ async def _lookup_kbs(
             filters_applied,
         )
 
-    if include_known_issues:
-        # Warm the known-issues cache for the whole batch concurrently; the
-        # per-KB lookups below are then served from it.
+    if include_known_issues or include_update_summary:
+        # Warm the support-page cache for the whole batch concurrently; the
+        # per-KB lookups below are then served from it (one combined record
+        # covers both blocks).
         await known_issues.prefetch(kb_numbers)
 
     results: list[dict] = []
@@ -1204,6 +1241,7 @@ async def _lookup_kbs(
             include_kb_details=include_kb_details,
             include_kev_details=include_kev_details,
             include_known_issues=include_known_issues,
+            include_update_summary=include_update_summary,
         )
         single.pop("filters_applied", None)
         entry = {"kb": f"KB{number}", "found": "error" not in single, **single}

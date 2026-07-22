@@ -165,6 +165,37 @@ async def test_live_kb_known_issues_through_tool():
     assert result["filters_applied"]["include_known_issues"] is True
 
 
+async def test_live_kb_update_summary_statuses():
+    """Drift canary for the support.microsoft.com update-summary scrape.
+
+    Same pages as the known-issues canary: if Microsoft changes the layout
+    this fails (status becomes "unavailable") and the parser needs updating.
+    """
+    from patch_tuesday_mcp.feeds import known_issues
+
+    result = await known_issues.fetch_update_summary("5094126")
+    assert result["status"] == "published", result
+    # Modern Win11 CU pages have no Summary heading, only Improvements;
+    # either flavor of content satisfies the contract.
+    assert result.get("summary") or result.get("improvements"), result
+    assert result["source_url"].startswith("https://support.microsoft.com/")
+
+    # SharePoint pages publish a Summary section (but no known issues).
+    sharepoint = await known_issues.fetch_update_summary("5002880")
+    assert sharepoint["status"] == "published", sharepoint
+
+    # A bogus KB's fuzzy redirect must not be trusted.
+    bogus = await known_issues.fetch_update_summary("9999999")
+    assert bogus["status"] == "none_published", bogus
+
+
+async def test_live_kb_update_summary_through_tool():
+    result = await msrc_search(kb="5094126", include_update_summary=True)
+    block = result["update_summary"]
+    assert block["status"] in {"published", "none_published"}, block
+    assert result["filters_applied"]["include_update_summary"] is True
+
+
 async def test_live_trend_search_across_recent_months():
     result = await msrc_search(months_back=3, limit=50)
     assert "error" not in result, result.get("error")
