@@ -8,9 +8,10 @@ from fastmcp import FastMCP
 # Suppress FastMCP's INFO logs to reduce console noise
 logging.getLogger("fastmcp").setLevel(logging.WARNING)
 
-from . import __version__, telemetry  # noqa: E402
+from . import __version__, deprecation, telemetry  # noqa: E402
 from .feeds import http_client  # noqa: E402
 from .middleware.body_limit import DEFAULT_MAX_BODY_BYTES, BodyLimitMiddleware  # noqa: E402
+from .middleware.deprecation_headers import DeprecationHeadersMiddleware  # noqa: E402
 from .middleware.rate_limit import RateLimitMiddleware  # noqa: E402
 from .tools.prompts import monthly_triage  # noqa: E402
 from .tools.search import msrc_search  # noqa: E402
@@ -123,11 +124,20 @@ mcp = FastMCP(
         "whose Patch Tuesday has occurred; the upcoming month's pre-release "
         "document (early/out-of-band entries only) is available via month=. "
         "A guided analyst workflow is available as the monthly_triage prompt."
-    ),
+    )
+    # Appended only on a deployment configured as retiring; empty everywhere
+    # else, so local/stdio and the current endpoint keep the exact same text.
+    + deprecation.instructions_suffix(),
 )
 
 # Register tools. Annotations let clients auto-approve: the tool only reads
 # public data from external APIs and is safe to retry.
+_tool_kwargs: dict = {}
+if deprecation.is_active():
+    _tool_kwargs["description"] = (
+        (msrc_search.__doc__ or "").strip() + "\n\n" + deprecation.tool_description_suffix()
+    )
+
 mcp.tool(
     msrc_search,
     title="Search Microsoft Security Updates",
@@ -136,6 +146,7 @@ mcp.tool(
         "idempotentHint": True,
         "openWorldHint": True,
     },
+    **_tool_kwargs,
 )
 
 # Register the monthly triage prompt template. It guides clients through the
@@ -158,7 +169,11 @@ async def health(request):
     """Liveness endpoint for container probes and uptime checks."""
     from starlette.responses import JSONResponse
 
-    return JSONResponse({"status": "ok", "server": "patch-tuesday-mcp", "version": __version__})
+    body = {"status": "ok", "server": "patch-tuesday-mcp", "version": __version__}
+    notice = deprecation.notice()
+    if notice is not None:
+        body["deprecation"] = notice
+    return JSONResponse(body)
 
 
 def build_http_app(*, log_settings: bool = False):
@@ -196,13 +211,22 @@ def build_http_app(*, log_settings: bool = False):
         trust_x_forwarded_for=trust_xff,
         trusted_proxies=trusted_proxies,
     )
+    # Deprecation headers wrap the rate limiter so throttled and rejected
+    # responses carry them too. Only mounted on a retiring deployment.
+    deprecation_headers = deprecation.headers()
+    if deprecation_headers:
+        app = DeprecationHeadersMiddleware(app, headers=deprecation_headers)
     # CORS outermost so preflights and 429/413 responses carry CORS headers
     app = CORSMiddleware(
         app,
         allow_origins=cors_origins,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["*"],
-        expose_headers=["Mcp-Session-Id"],
+        expose_headers=(
+            ["Mcp-Session-Id", "Deprecation", "Sunset", "Link"]
+            if deprecation_headers
+            else ["Mcp-Session-Id"]
+        ),
         max_age=86400,
     )
 
@@ -228,6 +252,12 @@ def build_http_app(*, log_settings: bool = False):
         else:
             print("Trusting X-Forwarded-For: no (direct peer IP only)")
         print(f"Telemetry: {'enabled' if telemetry_enabled else 'disabled'}")
+        notice = deprecation.notice()
+        if notice is not None:
+            print(
+                f"Deprecation: active — sunset {notice['sunset']}, "
+                f"successor {notice['replacement_url']}"
+            )
 
     return app
 

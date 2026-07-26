@@ -70,8 +70,24 @@ Other things it deliberately gets right:
 A free remote instance is available at:
 
 ```
-https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp
+https://patch-tuesday-mcp.agreeabledesert-d0b8e491.eastus2.azurecontainerapps.io/mcp
 ```
+
+> ### ⚠️ Endpoint moved — old URL retires 11 August 2026
+>
+> The hosted endpoint has moved to the URL above, which runs on more CPU and memory
+> and autoscales under load.
+>
+> The previous URL —
+> `https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp`
+> — still works today but **stops serving on Tuesday, 11 August 2026** (next Patch
+> Tuesday). Update your MCP client configuration before then. Responses from the old
+> endpoint carry a `deprecation` block and standard `Deprecation` / `Sunset` HTTP
+> headers so you can detect it programmatically.
+>
+> Nothing else changed: same tool, same data, same response shape. Local `uvx` /
+> `pip` installs are unaffected.
+
 No account or API key needed. The endpoint serves the same public data as a local install — for heavy use or guaranteed availability, run it locally (below) or [self-host your own](#self-hosting-as-a-remote-mcp-server). Only minimal, anonymized usage data is recorded — see [Telemetry & Privacy](#telemetry--privacy).
 
 ## Requirements
@@ -351,6 +367,30 @@ HTTP-mode environment variables:
 | `MCP_ENRICHMENT_MAX_RESPONSE_BYTES` | `33554432` (32 MiB) | Cap on a single EPSS/KEV upstream response body |
 | `MCP_KNOWN_ISSUES_MAX_RESPONSE_BYTES` | `4194304` (4 MiB) | Cap on a single support.microsoft.com KB-page body (known-issues / update-summary lookups) |
 | `APPLICATIONINSIGHTS_CONNECTION_STRING` | unset | Opt-in usage telemetry (requires `pip install patch-tuesday-mcp[telemetry]`) |
+| `MCP_DEPRECATION_SUNSET` | unset | ISO date (`YYYY-MM-DD`) this deployment stops serving. Set **together with** `MCP_DEPRECATION_REPLACEMENT_URL` to announce a migration (see below) |
+| `MCP_DEPRECATION_REPLACEMENT_URL` | unset | URL clients should move to |
+| `MCP_DEPRECATION_SINCE` | unset | Optional ISO date the deprecation was announced (emitted as an RFC 9745 `Deprecation` date) |
+| `MCP_DEPRECATION_MESSAGE` | unset | Optional override for the human-readable notice text |
+
+### Announcing a deprecation (self-hosters)
+
+If you are retiring a deployment, set `MCP_DEPRECATION_SUNSET` and
+`MCP_DEPRECATION_REPLACEMENT_URL` on **that deployment only**. The server then
+reports the migration through four channels:
+
+- a `deprecation` block on every `msrc_search` response (and on `/health`)
+- `Deprecation`, `Sunset`, and `Link: <url>; rel="successor-version"` response
+  headers ([RFC 9745](https://www.rfc-editor.org/rfc/rfc9745.html),
+  [RFC 8594](https://www.rfc-editor.org/rfc/rfc8594.html),
+  [RFC 5829](https://www.rfc-editor.org/rfc/rfc5829.html))
+- the MCP server `instructions` shown to clients at connection time
+- the `msrc_search` tool description
+
+All of it is **descriptive**: it states facts about the deployment. It never
+instructs a connected agent to say or do anything — tool output that issues
+directives to someone else's model is prompt injection, however benign the
+payload. Leave the variables unset and behavior is byte-for-byte unchanged;
+setting only one of the two pair, or a malformed date, is ignored.
 
 HTTP mode also serves `GET /health` (liveness endpoint) and runs stateless,
 so it can scale to multiple replicas behind a load balancer without session
