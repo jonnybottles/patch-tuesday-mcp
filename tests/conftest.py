@@ -39,6 +39,43 @@ def pytest_addoption(parser):
         default=False,
         help="Also run the rate-limit burst test (local containers only).",
     )
+    parser.addoption(
+        "--aca-scale",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the Azure Container Apps scale suite (tests/test_scale.py). "
+            "Requires an authenticated `az` CLI with reader access to the app."
+        ),
+    )
+    parser.addoption(
+        "--aca-scale-load",
+        action="store_true",
+        default=False,
+        help=(
+            "Also run the load-driven scale-out test. This temporarily raises "
+            "RATE_LIMIT_RPM on the live app (restored afterwards) and rolls "
+            "revisions -- operator-run only, never CI."
+        ),
+    )
+    parser.addoption(
+        "--aca-app",
+        action="store",
+        default="patch-tuesday-mcp",
+        help="Container App name for the scale suite.",
+    )
+    parser.addoption(
+        "--aca-rg",
+        action="store",
+        default="patch-tuesday-rg",
+        help="Resource group of the Container App for the scale suite.",
+    )
+    parser.addoption(
+        "--aca-subscription",
+        action="store",
+        default=None,
+        help="Subscription id for the scale suite (defaults to the az CLI's active one).",
+    )
 
 
 def pytest_configure(config):
@@ -57,12 +94,22 @@ def pytest_configure(config):
         "markers",
         "endpoint_burst: rate-limit burst test (needs --endpoint-burst; local containers only)",
     )
+    config.addinivalue_line(
+        "markers",
+        "scale: Azure Container Apps scale/capacity assertion (needs --aca-scale and the az CLI)",
+    )
+    config.addinivalue_line(
+        "markers",
+        "scale_load: load-driven scale-out test (needs --aca-scale-load; mutates the live app)",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
     run_live = config.getoption("--run-live") or os.getenv("PT_RUN_LIVE")
     endpoint_url = config.getoption("--endpoint-url")
     run_burst = config.getoption("--endpoint-burst")
+    run_scale = config.getoption("--aca-scale")
+    run_scale_load = config.getoption("--aca-scale-load")
 
     skip_live = pytest.mark.skip(reason="live test; pass --run-live or set PT_RUN_LIVE=1")
     skip_endpoint = pytest.mark.skip(
@@ -70,6 +117,10 @@ def pytest_collection_modifyitems(config, items):
     )
     skip_burst = pytest.mark.skip(
         reason="burst test; pass --endpoint-burst (local containers only)"
+    )
+    skip_scale = pytest.mark.skip(reason="scale test; pass --aca-scale (needs the az CLI)")
+    skip_scale_load = pytest.mark.skip(
+        reason="scale load test; pass --aca-scale-load (mutates the live app)"
     )
 
     for item in items:
@@ -79,6 +130,10 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_endpoint)
         if not run_burst and "endpoint_burst" in item.keywords:
             item.add_marker(skip_burst)
+        if not run_scale and "scale" in item.keywords:
+            item.add_marker(skip_scale)
+        if not run_scale_load and "scale_load" in item.keywords:
+            item.add_marker(skip_scale_load)
 
 
 @pytest.fixture(scope="session")
@@ -87,3 +142,14 @@ def endpoint_url(request):
     url = request.config.getoption("--endpoint-url")
     assert url, "endpoint tests require --endpoint-url"
     return url.rstrip("/")
+
+
+@pytest.fixture(scope="session")
+def aca_target(request):
+    """Container App coordinates for the scale suite (from ``--aca-*``)."""
+    assert request.config.getoption("--aca-scale"), "scale tests require --aca-scale"
+    return {
+        "app": request.config.getoption("--aca-app"),
+        "resource_group": request.config.getoption("--aca-rg"),
+        "subscription": request.config.getoption("--aca-subscription"),
+    }

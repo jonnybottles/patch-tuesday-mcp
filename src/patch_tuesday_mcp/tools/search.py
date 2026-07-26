@@ -8,7 +8,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from .. import telemetry
+from .. import deprecation, telemetry
 from ..feeds import enrichment, known_issues, msrc_api
 from ..feeds.msrc_api import MsrcApiError
 from ..models.vulnerability import (
@@ -403,6 +403,13 @@ async def msrc_search(
             "error": "The search failed due to an unexpected internal error.",
             "error_kind": "internal",
         }
+    # Deployment-level deprecation facts, attached to every result (including
+    # errors) only when this deployment is configured as retiring. Unset on
+    # local/stdio installs and on the current endpoint, where it is a no-op
+    # and the response shape is unchanged.
+    notice = deprecation.notice()
+    if notice is not None:
+        result["deprecation"] = notice
     telemetry.track_tool_call(
         "msrc_search",
         result.get("filters_applied", {}),

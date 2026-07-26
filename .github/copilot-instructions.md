@@ -1,14 +1,15 @@
-# CLAUDE.md
+# GitHub Copilot instructions — patch-tuesday-mcp
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to GitHub Copilot (and the Copilot CLI / coding agent) when working with
+code in this repository.
 
-> **⚠️ Keep the sibling instruction file in sync.** This repo is worked on from **both** Claude Code
-> and GitHub Copilot, and the owner switches between them. `CLAUDE.md` and
-> `.github/copilot-instructions.md` are intended to carry the **same** architecture, constraints,
-> commands, and operational knowledge. **Whenever you change this file, apply the equivalent change
-> to `.github/copilot-instructions.md` in the same commit** (and vice versa). If you learn something
-> durable during a session — a corrected fact, a new command, a resolved checklist item — write it to
-> *both* files before you finish. A change that lands in only one of them is a bug.
+> **⚠️ Keep the sibling instruction file in sync.** This repo is worked on from **both** GitHub Copilot
+> and Claude Code, and the owner switches between them. `.github/copilot-instructions.md` and
+> `CLAUDE.md` are intended to carry the **same** architecture, constraints, commands, and operational
+> knowledge — the body below is deliberately identical to `CLAUDE.md`. **Whenever you change this
+> file, apply the equivalent change to `CLAUDE.md` in the same commit** (and vice versa). If you
+> learn something durable during a session — a corrected fact, a new command, a resolved checklist
+> item — write it to *both* files before you finish. A change that lands in only one of them is a bug.
 
 ## What This Is
 
