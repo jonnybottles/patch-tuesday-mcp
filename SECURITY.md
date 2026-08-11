@@ -20,9 +20,6 @@ acknowledgment within 7 days.
 - The `xxbutler21xx/patch-tuesday-mcp` Docker image (HTTP transport)
 - The hosted endpoint
   `https://patch-tuesday-mcp.agreeabledesert-d0b8e491.eastus2.azurecontainerapps.io/mcp`
-- The previous hosted endpoint
-  `https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp`,
-  in scope until it is decommissioned on **11 August 2026**
 
 The hosted endpoint is intentionally unauthenticated and rate-limited; it only
 serves public MSRC/EPSS/KEV data. Testing that stays within the rate limits is
