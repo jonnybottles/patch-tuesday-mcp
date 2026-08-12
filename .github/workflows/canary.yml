@@ -37,14 +37,6 @@ jobs:
           pytest -q -m "endpoint and not endpoint_burst"
           --endpoint-url=https://patch-tuesday-mcp.agreeabledesert-d0b8e491.eastus2.azurecontainerapps.io
 
-      # The previous endpoint stays live for migration until 2026-08-11.
-      # A liveness + tool-list probe is enough to catch a silent outage there;
-      # DELETE THIS STEP once the old endpoint is decommissioned.
-      - name: Legacy endpoint still serving (retires 2026-08-11)
-        run: >-
-          pytest -q -m "endpoint and not endpoint_burst and not endpoint_upstream"
-          --endpoint-url=https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io
-
       - name: File or update canary issue
         if: failure()
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0

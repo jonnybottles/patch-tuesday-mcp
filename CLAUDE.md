@@ -56,10 +56,9 @@ On Windows in this repo use `.venv/Scripts/python -m pytest` etc. — the venv w
 
 **At the start of every session, run these checks and report the results to the user before other work.** When an item is resolved (merged/listed/confirmed/expired), remove it from this list in a follow-up commit so the list stays current — **and remove it from `.github/copilot-instructions.md` too**.
 
-1. **Old hosted endpoint retirement (due 2026-08-11)** — is today on/after **August 11, 2026**? If so, the grace period is over: delete the old Container App and its RG (sub `d30bd909-9bf4-4edd-a991-f44677e7c07f`, `patch-tuesday-rg`, eastus), delete the "Legacy endpoint still serving" step in `.github/workflows/canary.yml` (it is marked `DELETE THIS STEP`), and drop the deprecation blockquote from `README.md` + the old-URL scope line in `SECURITY.md`. Until then, confirm the old endpoint still answers `/health` **and** still carries its `deprecation` block.
-2. **Glama re-index** — Glama renders `README.md` directly, so it picks up doc changes with no PR, but on *its* schedule. Until it does, it advertises a stale endpoint. Check: `curl -sL https://glama.ai/mcp/servers/jonnybottles/patch-tuesday-mcp | grep -c agreeabledesert` should be non-zero (and `happyrock` should be gone). Still stale as of 2026-07-26, the day 0.9.1 merged. Drop this item once it flips.
-3. **Docker MCP Catalog PR** — CI green / review status? `gh pr view 4400 --repo docker/mcp-registry --json state,statusCheckRollup` (their CI builds the image itself; `server.yaml` pins `MCP_TRANSPORT=stdio` via config.env — if CI fails, fix in the fork branch `jonnybottles/mcp-registry:add-patch-tuesday`). Unaffected by the hosted-URL change (stdio only). Open with **zero CI runs** since 2026-07-11; nudged 2026-07-26 with the pinned `source.commit` refreshed to the v0.9.1 tree.
-4. **Monthly draft routine** (only in the week after a Patch Tuesday) — did the Wednesday run open a `briefing/YYYY-MM` PR and email drafts to the user? Routine: https://claude.ai/code/routines/trig_01X24fvnRGhC6Lop3NRjVaJh
+1. **Glama re-index** — Glama renders `README.md` directly, so it picks up doc changes with no PR, but on *its* schedule. Until it does, it advertises a stale endpoint. Check: `curl -sL https://glama.ai/mcp/servers/jonnybottles/patch-tuesday-mcp | grep -c agreeabledesert` should be non-zero (and `happyrock` should be gone). Still stale as of 2026-07-26, the day 0.9.1 merged. Drop this item once it flips.
+2. **Docker MCP Catalog PR** — CI green / review status? `gh pr view 4400 --repo docker/mcp-registry --json state,statusCheckRollup` (their CI builds the image itself; `server.yaml` pins `MCP_TRANSPORT=stdio` via config.env — if CI fails, fix in the fork branch `jonnybottles/mcp-registry:add-patch-tuesday`). Unaffected by the hosted-URL change (stdio only). Open with **zero CI runs** since 2026-07-11; nudged 2026-07-26 with the pinned `source.commit` refreshed to the v0.9.1 tree.
+3. **Monthly draft routine** (only in the week after a Patch Tuesday) — did the Wednesday run open a `briefing/YYYY-MM` PR and email drafts to the user? Routine: https://claude.ai/code/routines/trig_01X24fvnRGhC6Lop3NRjVaJh
 
 Standing follow-ups (no check needed, do when convenient): upload a social-preview image (repo Settings → Social preview).
 
@@ -89,27 +88,27 @@ Standing follow-ups (no check needed, do when convenient): upload a social-previ
 
 ## Release & Deployment
 
-### Hosted endpoints (public, no auth — owner's explicit choice)
+### Hosted endpoint (public, no auth — owner's explicit choice)
 
 | | URL | Subscription | RG / region | Purpose |
 |---|---|---|---|---|
-| **Current** | `https://patch-tuesday-mcp.agreeabledesert-d0b8e491.eastus2.azurecontainerapps.io/mcp` | `737d1571-00f3-486b-866b-24399aa29ac5` (ME-MngEnvMCAP124320, VS sub, tenant `3697dc7c-…`) | `patch-tuesday-rg` / **eastus2** | The one to advertise everywhere |
-| **Legacy** | `https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp` | `d30bd909-9bf4-4edd-a991-f44677e7c07f` (Platform Subscription, tenant `27793beb-…`) | `patch-tuesday-rg` / eastus | Grace period only — **retires 2026-08-11** |
+| **Current** | `https://patch-tuesday-mcp.agreeabledesert-d0b8e491.eastus2.azurecontainerapps.io/mcp` | `737d1571-00f3-486b-866b-24399aa29ac5` (ME-MngEnvMCAP124320, VS sub, tenant `3697dc7c-…`) | `patch-tuesday-rg` / **eastus2** | The one and only hosted endpoint |
 
-Both serve `/mcp` + `/health` (`/health` reports the running version). The current app runs
+It serves `/mcp` + `/health` (`/health` reports the running version). The app runs
 0.5 vCPU / 1 GiB, min 2 / max 6, an `http-concurrency` scale rule at **20**, `MCP_LIMIT_CONCURRENCY=100`,
-`RATE_LIMIT_RPM=60`. The legacy app keeps its original 0.25/0.5, min 1 sizing — it is only kept
-image-current so `/health` versions agree, **plus** the deprecation env vars below.
+`RATE_LIMIT_RPM=60`.
 
-**The legacy app is the only place the deprecation env vars are set** — that is what keeps the
-notice off local stdio installs and off the current endpoint:
-`MCP_DEPRECATION_SUNSET=2026-08-11`, `MCP_DEPRECATION_SINCE=2026-07-26`,
-`MCP_DEPRECATION_REPLACEMENT_URL=<current /mcp URL>`. Same image everywhere; only env differs.
+**A legacy endpoint (`happyrock-b60185ec.eastus`, sub `d30bd909-…`, tenant `27793beb-…`) was
+decommissioned on 2026-08-11** after a two-week deprecation grace period; its resource group was
+deleted and its Application Insights telemetry archived off-box first. No hosted deployment sets the
+deprecation env vars now — `deprecation.py` stays in the codebase as reusable machinery for the next
+migration, and its tests still pin the behavior.
 
-**Azure identity gotcha:** the two apps live in **different tenants**. `az` picks the right identity
-automatically when you pass `--subscription`, but SDK code using `DefaultAzureCredential` (e.g.
-`foundry-agent/`) uses the **default** `az` context — so `az account set --subscription 737d1571-…`
-first, or Foundry calls fail with a confusing `agents/read` RBAC error naming the *other* tenant's user.
+**Azure identity gotcha:** the hosted app lives in a **different tenant** from the owner's other
+Azure accounts. `az` picks the right identity when you pass `--subscription`, but SDK code using
+`DefaultAzureCredential` (e.g. `foundry-agent/`) uses the **default** `az` context — so
+`az account set --subscription 737d1571-…` first, or Foundry calls fail with a confusing
+`agents/read` RBAC error naming a different tenant's user.
 
 ### Deploy flow
 
@@ -117,8 +116,7 @@ first, or Foundry calls fail with a confusing `agents/read` RBAC error naming th
 2. `uv lock` (mandatory — `uv sync --locked` in the Dockerfile fails otherwise).
 3. Update the two `version` fields in `server.json`.
 4. `docker build -t docker.io/xxbutler21xx/patch-tuesday-mcp:<version> .` → `docker push`.
-5. `az containerapp update -n patch-tuesday-mcp -g patch-tuesday-rg --subscription <sub> --image …:<version>`
-   for **both** apps (current app keeps its resized spec; legacy app is image-only).
+5. `az containerapp update -n patch-tuesday-mcp -g patch-tuesday-rg --subscription 737d1571-… --image …:<version>`
 
 An unchanged image ref does not roll a new revision. ACA may briefly serve the draining old revision
 after an update. `az containerapp update` **echoes stale state in its own output** (it printed
@@ -128,8 +126,7 @@ after an update. `az containerapp update` **echoes stale state in its own output
 ### Post-deploy verification (every deployment)
 
 - Local container: `pytest -m endpoint --endpoint-url=http://localhost:8000 --endpoint-burst`.
-- Current ACA: `pytest -m "endpoint and not endpoint_burst" --endpoint-url=<current URL>`.
-- Legacy ACA (until 2026-08-11): same command against the legacy URL.
+- Hosted ACA: `pytest -m "endpoint and not endpoint_burst" --endpoint-url=<hosted URL>`.
 - Scale config assertions: `pytest -m "scale and not scale_load" --aca-scale --aca-subscription=737d1571-…`.
 
 Covers `/health` version match (override with `PT_EXPECTED_VERSION`), MCP tool round-trip over

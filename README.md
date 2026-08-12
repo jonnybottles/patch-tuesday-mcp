@@ -73,21 +73,6 @@ A free remote instance is available at:
 https://patch-tuesday-mcp.agreeabledesert-d0b8e491.eastus2.azurecontainerapps.io/mcp
 ```
 
-> ### ⚠️ Endpoint moved — old URL retires 11 August 2026
->
-> The hosted endpoint has moved to the URL above, which runs on more CPU and memory
-> and autoscales under load.
->
-> The previous URL —
-> `https://patch-tuesday-mcp.happyrock-b60185ec.eastus.azurecontainerapps.io/mcp`
-> — still works today but **stops serving on Tuesday, 11 August 2026** (next Patch
-> Tuesday). Update your MCP client configuration before then. Responses from the old
-> endpoint carry a `deprecation` block and standard `Deprecation` / `Sunset` HTTP
-> headers so you can detect it programmatically.
->
-> Nothing else changed: same tool, same data, same response shape. Local `uvx` /
-> `pip` installs are unaffected.
-
 No account or API key needed. The endpoint serves the same public data as a local install — for heavy use or guaranteed availability, run it locally (below) or [self-host your own](#self-hosting-as-a-remote-mcp-server). Only minimal, anonymized usage data is recorded — see [Telemetry & Privacy](#telemetry--privacy).
 
 ## Requirements
