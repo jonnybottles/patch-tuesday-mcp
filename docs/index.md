@@ -16,6 +16,7 @@ MCP client) answer questions like *"what do I patch first this month?"*
 ## Briefings
 
 - [June 2026]({{ site.baseurl }}/briefings/2026-06)
+- [September 2026]({{ site.baseurl }}/briefings/2026-09)
 
 ## Ask these questions yourself
 
